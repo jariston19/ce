@@ -1,0 +1,30 @@
+{
+  "name": "ce",
+  "version": "1.0.0",
+  "description": "",
+  "main": "serial.js",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "dev:server": "node serial.js",
+    "start": "node serial.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "mongodb": "^7.1.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "serialport": "^13.0.0",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.8"
+  }
+}
