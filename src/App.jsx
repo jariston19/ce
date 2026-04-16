@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
+import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
+import { DatePicker } from '@mui/x-date-pickers/DatePicker';
+import { TimePicker } from '@mui/x-date-pickers/TimePicker';
+import dayjs from 'dayjs';
 import { io } from 'socket.io-client';
 
 const SENSOR_KEYS = ['s1', 's2', 's3'];
@@ -30,6 +36,53 @@ const THEME_OPTIONS = [
   { key: 'white', label: 'White', swatch: '#f5f7fb' },
   { key: 'black', label: 'Black', swatch: '#1a1c20' },
 ];
+const MUI_THEME_TOKENS = {
+  sage: {
+    mode: 'light',
+    primary: '#223127',
+    secondary: '#6b7f71',
+    paper: '#fcfffb',
+    modal: '#fffdf8',
+    line: 'rgba(34, 49, 39, 0.08)',
+    modalBorder: 'rgba(33, 27, 23, 0.1)',
+  },
+  'mist-blue': {
+    mode: 'light',
+    primary: '#1a2733',
+    secondary: '#64778b',
+    paper: '#ffffff',
+    modal: '#fbfeff',
+    line: 'rgba(26, 39, 51, 0.08)',
+    modalBorder: 'rgba(26, 39, 51, 0.1)',
+  },
+  lavender: {
+    mode: 'light',
+    primary: '#2f2540',
+    secondary: '#7d7390',
+    paper: '#ffffff',
+    modal: '#fffcff',
+    line: 'rgba(47, 37, 64, 0.08)',
+    modalBorder: 'rgba(47, 37, 64, 0.1)',
+  },
+  white: {
+    mode: 'light',
+    primary: '#1f2730',
+    secondary: '#6d7782',
+    paper: '#ffffff',
+    modal: '#ffffff',
+    line: 'rgba(31, 39, 48, 0.08)',
+    modalBorder: 'rgba(31, 39, 48, 0.1)',
+  },
+  black: {
+    mode: 'dark',
+    primary: '#eef1f5',
+    secondary: '#b0b6c1',
+    paper: '#373c45',
+    modal: '#292d34',
+    line: 'rgba(238, 241, 245, 0.08)',
+    modalBorder: 'rgba(238, 241, 245, 0.08)',
+  },
+};
 const TREND_METRICS = {
   sensor: {
     label: 'Sensor reading',
@@ -179,6 +232,75 @@ function openNativePicker(event) {
   if (typeof input.showPicker === 'function') {
     input.showPicker();
   }
+}
+
+function parseDateInputValue(value) {
+  if (!value) {
+    return null;
+  }
+
+  const [year, month, day] = value.split('-').map(Number);
+
+  if (!year || !month || !day) {
+    return null;
+  }
+
+  return new Date(year, month - 1, day);
+}
+
+function formatDateInputValue(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function dateStringToDayjs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = dayjs(value, 'YYYY-MM-DD', true);
+  return parsed.isValid() ? parsed : null;
+}
+
+function parseTimeInputValue(value, anchorDate = new Date()) {
+  if (!value) {
+    return null;
+  }
+
+  const [hours, minutes] = value.split(':').map(Number);
+
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) {
+    return null;
+  }
+
+  const parsed = new Date(anchorDate);
+  parsed.setHours(hours, minutes, 0, 0);
+  return parsed;
+}
+
+function formatTimeInputValue(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function timeStringToDayjs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = dayjs(value, 'HH:mm', true);
+  return parsed.isValid() ? parsed : null;
 }
 
 function escapeHtml(value) {
@@ -378,6 +500,34 @@ function buildDateTimeQueryValue(date, time, fallbackTime) {
   return `${date}T${time || fallbackTime}`;
 }
 
+function buildSimulationRange({
+  date,
+  startTime,
+  endTime,
+  sampleCount,
+}) {
+  const defaultDate = getLocalDateInputValue();
+  const baseDate = date || defaultDate;
+  const startValue = buildDateTimeQueryValue(baseDate, startTime, '00:00');
+  const endValue = buildDateTimeQueryValue(baseDate, endTime, '23:59');
+  const start = startValue ? new Date(startValue) : new Date(`${defaultDate}T00:00`);
+  const end = endValue ? new Date(endValue) : new Date(`${defaultDate}T23:59:59`);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    const fallbackStart = new Date(`${defaultDate}T00:00:00`);
+    const fallbackEnd = new Date(`${defaultDate}T23:59:59`);
+    return {
+      start: fallbackStart,
+      stepMs: (fallbackEnd.getTime() - fallbackStart.getTime()) / Math.max(sampleCount - 1, 1),
+    };
+  }
+
+  return {
+    start,
+    stepMs: (end.getTime() - start.getTime()) / Math.max(sampleCount - 1, 1),
+  };
+}
+
 function buildReportFeedUrl({ date, startTime, endTime }) {
   const params = new URLSearchParams({
     limit: String(REPORT_POINTS),
@@ -408,24 +558,62 @@ function roundMetric(value, digits = 2) {
   return Number(value.toFixed(digits));
 }
 
-function buildSimulatedReading(createdAt, index) {
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function createSimulationProfile() {
+  return {
+    baseLevel: randomBetween(356, 378),
+    primaryAmplitude: randomBetween(14, 24),
+    secondaryAmplitude: randomBetween(4, 9),
+    interactionRatioBase: randomBetween(0.84, 0.9),
+    interactionRatioSwing: randomBetween(0.015, 0.04),
+    transmittedRatioBase: randomBetween(0.69, 0.79),
+    transmittedRatioSwing: randomBetween(0.02, 0.05),
+    periodBase: randomBetween(4.3, 5.3),
+    periodSwing: randomBetween(0.12, 0.34),
+    sensorS1Amplitude: randomBetween(4.1, 5.5),
+    sensorS2Amplitude: randomBetween(3.6, 4.8),
+    sensorS3Amplitude: randomBetween(2.9, 4.1),
+    sensorDrift: randomBetween(0.35, 0.85),
+    phaseS2: randomBetween(0.25, 0.7),
+    phaseS3: randomBetween(0.65, 1.15),
+    freqS2Factor: randomBetween(0.99, 1.03),
+    freqS3Factor: randomBetween(0.95, 1.01),
+    trendShift: randomBetween(0, Math.PI * 2),
+  };
+}
+
+function buildSimulatedReading(createdAt, index, profile) {
   const t = index;
-  const basePeriodSec = 4.8 + 0.25 * Math.sin(t / 18);
+  const basePeriodSec = profile.periodBase + profile.periodSwing * Math.sin(t / 18 + profile.trendShift);
   const frequencyHz = 1 / basePeriodSec;
 
-  const incidentWaveHeight = 368 + 18 * Math.sin(t / 9) + 7 * Math.sin(t / 3.8);
+  const incidentWaveHeight =
+    profile.baseLevel +
+    profile.primaryAmplitude * Math.sin(t / 9 + profile.trendShift) +
+    profile.secondaryAmplitude * Math.sin(t / 3.8 + profile.trendShift * 0.5);
   const interactionWaveHeight =
-    incidentWaveHeight * (0.87 + 0.03 * Math.sin(t / 11 + 0.6));
+    incidentWaveHeight *
+    (profile.interactionRatioBase +
+      profile.interactionRatioSwing * Math.sin(t / 11 + 0.6 + profile.trendShift));
   const transmittedWaveHeight =
-    incidentWaveHeight * (0.74 + 0.04 * Math.sin(t / 13 + 1.2));
+    incidentWaveHeight *
+    (profile.transmittedRatioBase +
+      profile.transmittedRatioSwing * Math.sin(t / 13 + 1.2 + profile.trendShift));
 
-  const sensorS1 = 4.8 * Math.sin((2 * Math.PI * t) / basePeriodSec) + 0.7 * Math.sin(t / 2.3);
+  const sensorS1 =
+    profile.sensorS1Amplitude * Math.sin((2 * Math.PI * t) / basePeriodSec) +
+    profile.sensorDrift * Math.sin(t / 2.3 + profile.trendShift);
   const sensorS2 =
-    4.2 * Math.sin((2 * Math.PI * t) / (basePeriodSec * 0.98) + 0.45) +
-    0.6 * Math.sin(t / 2.6);
+    profile.sensorS2Amplitude *
+      Math.sin((2 * Math.PI * t) / (basePeriodSec * profile.freqS2Factor) + profile.phaseS2) +
+    profile.sensorDrift * 0.82 * Math.sin(t / 2.6 + profile.trendShift * 0.8);
   const sensorS3 =
-    3.5 * Math.sin((2 * Math.PI * t) / (basePeriodSec * 1.04) + 0.9) +
-    0.45 * Math.sin(t / 2.9);
+    profile.sensorS3Amplitude *
+      Math.sin((2 * Math.PI * t) / (basePeriodSec * profile.freqS3Factor) + profile.phaseS3) +
+    profile.sensorDrift * 0.64 * Math.sin(t / 2.9 + profile.trendShift * 0.65);
 
   const reductionEfficiencyPct =
     ((incidentWaveHeight - transmittedWaveHeight) / incidentWaveHeight) * 100;
@@ -483,13 +671,25 @@ function buildSimulatedReading(createdAt, index) {
   };
 }
 
-function buildSimulatedReadings(sampleCount = 180) {
+function buildSimulatedReadings(options = {}) {
+  const {
+    sampleCount = 180,
+    date,
+    startTime,
+    endTime,
+  } = options;
   const readings = [];
-  const startTime = new Date(Date.now() - (sampleCount - 1) * 1000);
+  const simulationRange = buildSimulationRange({
+    date,
+    startTime,
+    endTime,
+    sampleCount,
+  });
+  const profile = createSimulationProfile();
 
   for (let index = 0; index < sampleCount; index += 1) {
-    const createdAt = new Date(startTime.getTime() + index * 1000);
-    readings.push(buildSimulatedReading(createdAt, index));
+    const createdAt = new Date(simulationRange.start.getTime() + simulationRange.stepMs * index);
+    readings.push(buildSimulatedReading(createdAt, index, profile));
   }
 
   return readings;
@@ -1335,6 +1535,33 @@ function ThemePicker({ theme, onThemeChange }) {
   );
 }
 
+function FloatingToast({ toast, onClose }) {
+  if (!toast) {
+    return null;
+  }
+
+  return createPortal(
+    <div className={`floating-toast floating-toast-${toast.kind || 'info'}`} role="status" aria-live="polite">
+      <div className="floating-toast-copy">
+        <strong>{toast.title}</strong>
+        <span>{toast.message}</span>
+      </div>
+      <button type="button" className="floating-toast-close" onClick={onClose} aria-label="Dismiss notification">
+        <svg viewBox="0 0 14 14" aria-hidden="true">
+          <path
+            d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeWidth="1.6"
+          />
+        </svg>
+      </button>
+    </div>,
+    document.body
+  );
+}
+
 function TopBar({ page, onNavigate, theme, onThemeChange }) {
   return (
     <header className="top-bar">
@@ -1640,45 +1867,68 @@ function TrendsPage({
 
       <section className="chart-panel report-controls-panel">
         <div className="report-actions">
-          <div className="report-filter-grid">
-            <label className="report-select">
-              <span className="status-label">Visualization metric</span>
-              <MetricSelect value={metricKey} onChange={onMetricChange} />
-            </label>
+          <LocalizationProvider dateAdapter={AdapterDayjs}>
+            <div className="report-filter-grid">
+              <label className="report-select">
+                <span className="status-label">Visualization metric</span>
+                <MetricSelect value={metricKey} onChange={onMetricChange} />
+              </label>
 
-            <label className="report-select">
-              <span className="status-label">Filter date</span>
-              <input
-                type="date"
-                value={reportDate}
-                onChange={(event) => onDateChange(event.target.value)}
-                onClick={openNativePicker}
-                onFocus={openNativePicker}
-              />
-            </label>
+              <label className="report-select">
+                <span className="status-label">Filter date</span>
+                <DatePicker
+                  value={dateStringToDayjs(reportDate)}
+                  format="MM/DD/YYYY"
+                  onChange={(nextValue) => {
+                    onDateChange(nextValue?.isValid() ? nextValue.format('YYYY-MM-DD') : '');
+                  }}
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      size: 'small',
+                      className: 'mui-picker-input',
+                    },
+                  }}
+                />
+              </label>
 
-            <label className="report-select">
-              <span className="status-label">From</span>
-              <input
-                type="time"
-                value={startTime}
-                onChange={(event) => onStartTimeChange(event.target.value)}
-                onClick={openNativePicker}
-                onFocus={openNativePicker}
-              />
-            </label>
+              <label className="report-select">
+                <span className="status-label">From</span>
+                <TimePicker
+                  value={timeStringToDayjs(startTime)}
+                  format="hh:mm A"
+                  onChange={(nextValue) => {
+                    onStartTimeChange(nextValue?.isValid() ? nextValue.format('HH:mm') : '');
+                  }}
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      size: 'small',
+                      className: 'mui-picker-input',
+                    },
+                  }}
+                />
+              </label>
 
-            <label className="report-select">
-              <span className="status-label">To</span>
-              <input
-                type="time"
-                value={endTime}
-                onChange={(event) => onEndTimeChange(event.target.value)}
-                onClick={openNativePicker}
-                onFocus={openNativePicker}
-              />
-            </label>
-          </div>
+              <label className="report-select">
+                <span className="status-label">To</span>
+                <TimePicker
+                  value={timeStringToDayjs(endTime)}
+                  format="hh:mm A"
+                  onChange={(nextValue) => {
+                    onEndTimeChange(nextValue?.isValid() ? nextValue.format('HH:mm') : '');
+                  }}
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      size: 'small',
+                      className: 'mui-picker-input',
+                    },
+                  }}
+                />
+              </label>
+            </div>
+          </LocalizationProvider>
 
           <div className="report-button-row">
             <button
@@ -1687,7 +1937,7 @@ function TrendsPage({
               onClick={onRefresh}
               disabled={isSimulationMode}
             >
-              {isRefreshing ? 'Fetching DB...' : 'Fetch from Database'}
+              Fetch from Database
             </button>
 
             <button
@@ -1895,6 +2145,7 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState('Connecting...');
   const [lastUpdated, setLastUpdated] = useState('Waiting for data');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [toast, setToast] = useState(null);
   const [visibleSensors, setVisibleSensors] = useState({
     s1: true,
     s2: true,
@@ -1922,6 +2173,144 @@ export default function App() {
     }
   }, [theme]);
 
+  const muiTheme = useMemo(
+    () => {
+      const tokens = MUI_THEME_TOKENS[theme] || MUI_THEME_TOKENS.sage;
+
+      return createTheme({
+        palette: {
+          mode: tokens.mode,
+          primary: {
+            main: tokens.primary,
+            contrastText: tokens.paper,
+          },
+          secondary: {
+            main: tokens.secondary,
+          },
+          text: {
+            primary: tokens.primary,
+            secondary: tokens.secondary,
+          },
+          background: {
+            default: tokens.paper,
+            paper: tokens.paper,
+          },
+          divider: tokens.line,
+        },
+        shape: {
+          borderRadius: 18,
+        },
+        typography: {
+          fontFamily: 'var(--font-body)',
+        },
+        components: {
+          MuiPaper: {
+            styleOverrides: {
+              root: {
+                backgroundColor: tokens.paper,
+                backgroundImage: 'none',
+                color: tokens.primary,
+                border: `1px solid ${tokens.line}`,
+              },
+            },
+          },
+          MuiDialog: {
+            styleOverrides: {
+              paper: {
+                backgroundColor: tokens.modal,
+                color: tokens.primary,
+                border: `1px solid ${tokens.modalBorder}`,
+                boxShadow: 'var(--modal-shadow)',
+              },
+            },
+          },
+          MuiPopover: {
+            styleOverrides: {
+              paper: {
+                backgroundColor: tokens.paper,
+                color: tokens.primary,
+                border: `1px solid ${tokens.line}`,
+              },
+            },
+          },
+          MuiPopper: {
+            styleOverrides: {
+              root: {
+                zIndex: 45,
+              },
+            },
+          },
+          MuiOutlinedInput: {
+            styleOverrides: {
+              root: {
+                backgroundColor: tokens.paper,
+                color: tokens.primary,
+                borderRadius: 18,
+              },
+              notchedOutline: {
+                borderColor: tokens.line,
+              },
+              input: {
+                color: tokens.primary,
+                fontFamily: 'var(--font-body)',
+              },
+            },
+          },
+          MuiInputLabel: {
+            styleOverrides: {
+              root: {
+                color: tokens.secondary,
+                fontFamily: 'var(--font-body)',
+              },
+            },
+          },
+          MuiIconButton: {
+            styleOverrides: {
+              root: {
+                color: tokens.secondary,
+              },
+            },
+          },
+          MuiPickersDay: {
+            styleOverrides: {
+              root: {
+                color: tokens.primary,
+                '&:hover': {
+                  backgroundColor: 'color-mix(in srgb, currentColor 10%, transparent)',
+                },
+                '&.Mui-selected': {
+                  backgroundColor: 'color-mix(in srgb, currentColor 18%, transparent)',
+                  color: tokens.primary,
+                },
+                '&.Mui-selected:hover': {
+                  backgroundColor: 'color-mix(in srgb, currentColor 22%, transparent)',
+                },
+              },
+            },
+          },
+          MuiMenuItem: {
+            styleOverrides: {
+              root: {
+                color: tokens.primary,
+                '&.Mui-selected': {
+                  backgroundColor: 'color-mix(in srgb, currentColor 18%, transparent)',
+                },
+              },
+            },
+          },
+          MuiClockNumber: {
+            styleOverrides: {
+              root: {
+                color: tokens.primary,
+              },
+            },
+          },
+        },
+      });
+    },
+    [theme]
+  );
+
   useEffect(() => {
     reportReadingsRef.current = reportReadings;
   }, [reportReadings]);
@@ -1937,6 +2326,20 @@ export default function App() {
       endTime: reportEndTime,
     };
   }, [reportDate, reportStartTime, reportEndTime]);
+
+  useEffect(() => {
+    if (!toast) {
+      return undefined;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setToast(null);
+    }, 3200);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [toast]);
 
   useEffect(() => {
     if (page === renderedPage) {
@@ -1977,6 +2380,8 @@ export default function App() {
   async function syncReadingsFromDatabase(options = {}) {
     const {
       silent = false,
+      notifyOnEmpty = !silent,
+      notifyOnError = !silent,
       reportDate: nextReportDate = reportFiltersRef.current.date,
       reportStartTime: nextReportStartTime = reportFiltersRef.current.startTime,
       reportEndTime: nextReportEndTime = reportFiltersRef.current.endTime,
@@ -2020,10 +2425,24 @@ export default function App() {
         setConnectionStatus('Showing saved database readings');
       } else {
         setConnectionStatus('No saved records found for the selected date and time range');
+        if (notifyOnEmpty) {
+          setToast({
+            kind: 'warning',
+            title: 'No data found',
+            message: 'No readings were saved for the selected date and time range.',
+          });
+        }
       }
     } catch (error) {
       setConnectionStatus('History unavailable');
       setLastUpdated(error.message);
+      if (notifyOnError) {
+        setToast({
+          kind: 'error',
+          title: 'Unable to fetch data',
+          message: error.message || 'The selected records could not be loaded right now.',
+        });
+      }
     } finally {
       if (!silent) {
         setIsRefreshing(false);
@@ -2191,7 +2610,11 @@ export default function App() {
   };
 
   const handleStartSimulation = () => {
-    const simulatedReadings = buildSimulatedReadings();
+    const simulatedReadings = buildSimulatedReadings({
+      date: reportDate,
+      startTime: reportStartTime,
+      endTime: reportEndTime,
+    });
     const latestReading = simulatedReadings[simulatedReadings.length - 1] || null;
 
     setIsSimulationMode(true);
@@ -2207,25 +2630,29 @@ export default function App() {
 
   const handleStopSimulation = () => {
     setIsSimulationMode(false);
+    setToast(null);
     syncReadingsFromDatabase({
       reportDate,
       reportStartTime,
       reportEndTime,
+      notifyOnEmpty: false,
+      notifyOnError: false,
     });
   };
 
   return (
-    <main className="page">
-      <TopBar
-        page={page}
-        onNavigate={handleNavigate}
-        theme={theme}
-        onThemeChange={setTheme}
-      />
+    <ThemeProvider theme={muiTheme}>
+      <main className="page">
+        <TopBar
+          page={page}
+          onNavigate={handleNavigate}
+          theme={theme}
+          onThemeChange={setTheme}
+        />
 
-      <div className={`route-shell route-shell-${pageTransitionStage}`}>
-        {renderedPage === 'trends' ? (
-          <TrendsPage
+        <div className={`route-shell route-shell-${pageTransitionStage}`}>
+          {renderedPage === 'trends' ? (
+            <TrendsPage
             connectionStatus={connectionStatus}
             isSimulationMode={isSimulationMode}
             lastUpdated={lastUpdated}
@@ -2269,9 +2696,9 @@ export default function App() {
             }
             onStartSimulation={handleStartSimulation}
             onStopSimulation={handleStopSimulation}
-          />
-        ) : (
-          <DashboardPage
+            />
+          ) : (
+            <DashboardPage
             analytics={analytics}
             connectionStatus={connectionStatus}
             historyBySensor={historyBySensor}
@@ -2293,9 +2720,11 @@ export default function App() {
               }))
             }
             onToggleValueLabels={setShowValueLabels}
-          />
-        )}
-      </div>
-    </main>
+            />
+          )}
+        </div>
+        <FloatingToast toast={toast} onClose={() => setToast(null)} />
+      </main>
+    </ThemeProvider>
   );
 }
