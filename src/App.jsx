@@ -10,9 +10,9 @@ import { io } from 'socket.io-client';
 
 const SENSOR_KEYS = ['s1', 's2', 's3'];
 const SENSOR_META = {
-  s1: { label: 'Incident Wave', shortLabel: 'S1', color: '#d74d37' },
-  s2: { label: 'Interaction Zone', shortLabel: 'S2', color: '#287271' },
-  s3: { label: 'Transmitted Wave', shortLabel: 'S3', color: '#d9a441' },
+  s1: { label: 'Sensor 1', shortLabel: 'S1', color: '#d62828' },
+  s2: { label: 'Sensor 2', shortLabel: 'S2', color: '#111111' },
+  s3: { label: 'Sensor 3', shortLabel: 'S3', color: '#ffffff' },
   average: { label: 'Average', color: '#3e3a39' },
 };
 const MAX_POINTS = 40;
@@ -85,65 +85,53 @@ const MUI_THEME_TOKENS = {
 };
 const TREND_METRICS = {
   sensor: {
-    label: 'Sensor reading',
+    label: 'Actual height',
     unit: 'cm',
-    getValue: (reading, key) => reading?.sensors?.[key],
+    getValue: (reading, key) => getDisplayedHeightCm(reading?.sensors?.[key]),
   },
-  waveHeightCm: {
-    label: 'Wave height',
+  displacement: {
+    label: 'Displacement',
     unit: 'cm',
-    getValue: (reading, key) => reading?.analytics?.perSensor?.[key]?.waveHeightCm,
-  },
-  frequencyHz: {
-    label: 'Frequency',
-    unit: 'Hz',
-    getValue: (reading, key) => reading?.analytics?.perSensor?.[key]?.frequencyHz,
-  },
-  periodSec: {
-    label: 'Period',
-    unit: 's',
-    getValue: (reading, key) => reading?.analytics?.perSensor?.[key]?.periodSec,
+    getValue: (reading, key) =>
+      reading?.analytics?.perSensor?.[key]?.currentDisplacementCm,
   },
 };
 const TABLE_COLUMN_GROUPS = {
-  heights: {
-    label: 'Heights',
+  actualHeights: {
+    label: 'Actual Heights',
     columns: [
-      { key: 'incidentHeight', label: 'Incident Height' },
-      { key: 'interactionHeight', label: 'Interaction Height' },
-      { key: 'transmittedHeight', label: 'Transmitted Height' },
+      { key: 'incidentActualHeight', label: 'Sensor 1 Height' },
+      { key: 'interactionActualHeight', label: 'Sensor 2 Height' },
+      { key: 'transmittedActualHeight', label: 'Sensor 3 Height' },
     ],
   },
-  frequency: {
-    label: 'Frequency',
+  displacement: {
+    label: 'Displacement',
     columns: [
-      { key: 'incidentFreq', label: 'Incident Freq' },
-      { key: 'interactionFreq', label: 'Interaction Freq' },
-      { key: 'transmittedFreq', label: 'Transmitted Freq' },
+      { key: 'incidentDisplacement', label: 'Sensor 1 Disp.' },
+      { key: 'interactionDisplacement', label: 'Sensor 2 Disp.' },
+      { key: 'transmittedDisplacement', label: 'Sensor 3 Disp.' },
     ],
   },
-  period: {
-    label: 'Period',
+  extrema: {
+    label: 'Extrema',
     columns: [
-      { key: 'incidentPeriod', label: 'Incident Period' },
-      { key: 'interactionPeriod', label: 'Interaction Period' },
-      { key: 'transmittedPeriod', label: 'Transmitted Period' },
-    ],
-  },
-  performance: {
-    label: 'Performance Metrics',
-    columns: [
-      { key: 'reductionEfficiency', label: 'Reduction Eff.' },
-      { key: 'transmissionRatio', label: 'Transmission Ratio' },
-      { key: 'interactionChange', label: 'Interaction Change' },
+      { key: 'incidentMaxCrest', label: 'Sensor 1 Max Crest' },
+      { key: 'incidentMaxTrough', label: 'Sensor 1 Max Trough' },
+      { key: 'incidentSpan', label: 'Sensor 1 Span' },
+      { key: 'interactionMaxCrest', label: 'Sensor 2 Max Crest' },
+      { key: 'interactionMaxTrough', label: 'Sensor 2 Max Trough' },
+      { key: 'interactionSpan', label: 'Sensor 2 Span' },
+      { key: 'transmittedMaxCrest', label: 'Sensor 3 Max Crest' },
+      { key: 'transmittedMaxTrough', label: 'Sensor 3 Max Trough' },
+      { key: 'transmittedSpan', label: 'Sensor 3 Span' },
     ],
   },
 };
 const DEFAULT_TABLE_COLUMN_GROUPS = {
-  heights: true,
-  frequency: false,
-  period: false,
-  performance: true,
+  actualHeights: true,
+  displacement: true,
+  extrema: false,
 };
 
 function createAlarmController() {
@@ -206,6 +194,19 @@ function formatValue(value) {
 
 function formatMetricValue(value, unit = '') {
   const base = formatValue(value);
+  return base === '--' ? base : `${base}${unit ? ` ${unit}` : ''}`;
+}
+
+function formatSignedValue(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return '--';
+  }
+
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}`;
+}
+
+function formatSignedMetricValue(value, unit = '') {
+  const base = formatSignedValue(value);
   return base === '--' ? base : `${base}${unit ? ` ${unit}` : ''}`;
 }
 
@@ -294,6 +295,97 @@ function formatTimeInputValue(date) {
   return `${hours}:${minutes}`;
 }
 
+function getDisplayedHeightCm(value) {
+  return value;
+}
+
+function getSensorSystemStatus(calibrationStatus, serialRuntimeStatus) {
+  if (serialRuntimeStatus && serialRuntimeStatus.enabled === false) {
+    return {
+      label: 'Serial disabled',
+      detail: serialRuntimeStatus.message || 'Sensors are disabled for this session.',
+    };
+  }
+
+  if (serialRuntimeStatus && serialRuntimeStatus.connected === false) {
+    return {
+      label: 'Starting up',
+      detail: serialRuntimeStatus.message || 'Waiting for the sensor controller to connect.',
+    };
+  }
+
+  if (calibrationStatus?.active) {
+    if (calibrationStatus.detail) {
+      return {
+        label: 'Calibrating',
+        detail: calibrationStatus.detail,
+      };
+    }
+
+    if (
+      calibrationStatus.phase === 'noise' &&
+      typeof calibrationStatus.collected === 'number' &&
+      typeof calibrationStatus.targetSamples === 'number'
+    ) {
+      return {
+        label: 'Calibrating',
+        detail: `Measuring water noise ${calibrationStatus.collected}/${calibrationStatus.targetSamples} sec`,
+      };
+    }
+
+    return {
+      label: 'Calibrating',
+      detail: `Collecting baseline samples ${calibrationStatus.collected}/${calibrationStatus.targetSamples}`,
+    };
+  }
+
+  if (calibrationStatus?.source === 'raw' && serialRuntimeStatus?.connected) {
+    return {
+      label: 'Ready',
+      detail:
+        calibrationStatus.detail ||
+        'Raw sensor mode is active. No baseline calibration is applied.',
+    };
+  }
+
+  if (
+    calibrationStatus?.source === 'node' &&
+    calibrationStatus?.adaptiveActive
+  ) {
+    return {
+      label: 'Self-calibrating',
+      detail:
+        calibrationStatus.detail ||
+        'The baseline is slowly adapting to long-term water-level drift.',
+    };
+  }
+
+  if (
+    calibrationStatus?.source === 'arduino' &&
+    serialRuntimeStatus?.connected &&
+    !calibrationStatus?.completedAt
+  ) {
+    return {
+      label: 'Starting up',
+      detail: calibrationStatus?.detail || 'Waiting for Arduino calibration status.',
+    };
+  }
+
+  if (serialRuntimeStatus?.connected) {
+    return {
+      label: 'Ready',
+      detail:
+        calibrationStatus?.detail ||
+        'Sensors are connected and baseline calibration is complete.',
+    };
+  }
+
+  return {
+    label: 'Waiting',
+    detail: 'Awaiting sensor startup status.',
+  };
+}
+
 function timeStringToDayjs(value) {
   if (!value) {
     return null;
@@ -334,55 +426,294 @@ function getTrendTableCellValue(reading, columnKey) {
     return formatTimestamp(reading.createdAt);
   }
 
-  if (columnKey === 'incidentHeight') {
-    return formatMetricValue(reading.analytics?.perSensor?.s1?.waveHeightCm, 'cm');
+  if (columnKey === 'incidentActualHeight') {
+    return formatMetricValue(reading?.sensors?.s1, 'cm');
   }
 
-  if (columnKey === 'interactionHeight') {
-    return formatMetricValue(reading.analytics?.perSensor?.s2?.waveHeightCm, 'cm');
+  if (columnKey === 'interactionActualHeight') {
+    return formatMetricValue(reading?.sensors?.s2, 'cm');
   }
 
-  if (columnKey === 'transmittedHeight') {
-    return formatMetricValue(reading.analytics?.perSensor?.s3?.waveHeightCm, 'cm');
+  if (columnKey === 'transmittedActualHeight') {
+    return formatMetricValue(reading?.sensors?.s3, 'cm');
   }
 
-  if (columnKey === 'incidentFreq') {
-    return formatMetricValue(reading.analytics?.perSensor?.s1?.frequencyHz, 'Hz');
+  if (columnKey === 'incidentDisplacement') {
+    return formatMetricValue(reading.analytics?.perSensor?.s1?.currentDisplacementCm, 'cm');
   }
 
-  if (columnKey === 'interactionFreq') {
-    return formatMetricValue(reading.analytics?.perSensor?.s2?.frequencyHz, 'Hz');
+  if (columnKey === 'interactionDisplacement') {
+    return formatMetricValue(reading.analytics?.perSensor?.s2?.currentDisplacementCm, 'cm');
   }
 
-  if (columnKey === 'transmittedFreq') {
-    return formatMetricValue(reading.analytics?.perSensor?.s3?.frequencyHz, 'Hz');
+  if (columnKey === 'transmittedDisplacement') {
+    return formatMetricValue(reading.analytics?.perSensor?.s3?.currentDisplacementCm, 'cm');
   }
 
-  if (columnKey === 'incidentPeriod') {
-    return formatMetricValue(reading.analytics?.perSensor?.s1?.periodSec, 's');
+  if (columnKey === 'incidentMaxCrest') {
+    return formatMetricValue(reading.analytics?.perSensor?.s1?.maxCrestCm, 'cm');
   }
 
-  if (columnKey === 'interactionPeriod') {
-    return formatMetricValue(reading.analytics?.perSensor?.s2?.periodSec, 's');
+  if (columnKey === 'incidentMaxTrough') {
+    return formatMetricValue(reading.analytics?.perSensor?.s1?.maxTroughCm, 'cm');
   }
 
-  if (columnKey === 'transmittedPeriod') {
-    return formatMetricValue(reading.analytics?.perSensor?.s3?.periodSec, 's');
+  if (columnKey === 'incidentSpan') {
+    return formatMetricValue(reading.analytics?.perSensor?.s1?.spanCm, 'cm');
   }
 
-  if (columnKey === 'reductionEfficiency') {
-    return formatMetricValue(reading.analytics?.breakwater?.reductionEfficiencyPct, '%');
+  if (columnKey === 'interactionMaxCrest') {
+    return formatMetricValue(reading.analytics?.perSensor?.s2?.maxCrestCm, 'cm');
   }
 
-  if (columnKey === 'transmissionRatio') {
-    return formatValue(reading.analytics?.breakwater?.transmissionRatio);
+  if (columnKey === 'interactionMaxTrough') {
+    return formatMetricValue(reading.analytics?.perSensor?.s2?.maxTroughCm, 'cm');
   }
 
-  if (columnKey === 'interactionChange') {
-    return formatMetricValue(reading.analytics?.breakwater?.interactionChangePct, '%');
+  if (columnKey === 'interactionSpan') {
+    return formatMetricValue(reading.analytics?.perSensor?.s2?.spanCm, 'cm');
+  }
+
+  if (columnKey === 'transmittedMaxCrest') {
+    return formatMetricValue(reading.analytics?.perSensor?.s3?.maxCrestCm, 'cm');
+  }
+
+  if (columnKey === 'transmittedMaxTrough') {
+    return formatMetricValue(reading.analytics?.perSensor?.s3?.maxTroughCm, 'cm');
+  }
+
+  if (columnKey === 'transmittedSpan') {
+    return formatMetricValue(reading.analytics?.perSensor?.s3?.spanCm, 'cm');
   }
 
   return '--';
+}
+
+function buildPrintableTrendSeriesMap({
+  readings,
+  metricKey,
+  visibleSensors,
+  showAverage,
+}) {
+  const metric = TREND_METRICS[metricKey];
+  const baseSeriesMap = buildTrendSeries(readings, metricKey);
+
+  if (showAverage) {
+    baseSeriesMap.average = buildMetricAverageSeries(
+      readings,
+      visibleSensors,
+      metric.getValue
+    );
+  }
+
+  return Object.fromEntries(
+    [...SENSOR_KEYS, ...(showAverage ? ['average'] : [])]
+      .filter((key) => key === 'average' || visibleSensors[key])
+      .map((key) => [key, baseSeriesMap[key] || []])
+  );
+}
+
+function renderPrintableTrendChartMarkup({
+  readings,
+  metricKey,
+  visibleSensors,
+  showAverage,
+}) {
+  const seriesMap = buildPrintableTrendSeriesMap({
+    readings,
+    metricKey,
+    visibleSensors,
+    showAverage,
+  });
+  const activeKeys = Object.keys(seriesMap).filter((key) => (seriesMap[key] || []).length);
+
+  if (!activeKeys.length) {
+    return '<div class="print-chart-empty">No trend data available for the selected filters.</div>';
+  }
+
+  const hasAverageSeries = activeKeys.includes('average');
+  const longestSeriesLength = Math.max(
+    ...activeKeys.map((key) => seriesMap[key].length),
+    1
+  );
+  const allValues = activeKeys.flatMap((key) =>
+    seriesMap[key].map((entry) => entry.value)
+  );
+  const minValue = Math.min(...allValues);
+  const maxValue = Math.max(...allValues);
+  const range = maxValue - minValue || 1;
+  const innerWidth = CHART_WIDTH - CHART_PADDING * 2;
+  const innerHeight = CHART_HEIGHT - CHART_PADDING * 2 - CHART_X_AXIS_HEIGHT;
+  const xStep = Math.max(innerWidth / Math.max(longestSeriesLength - 1, 1), 1);
+  const guideLines = Array.from({ length: 4 }, (_, index) => ({
+    y: CHART_PADDING + (innerHeight / 3) * index,
+  }));
+  const scaleLabels = Array.from({ length: 4 }, (_, index) => {
+    const ratio = 1 - index / 3;
+    const value = minValue + range * ratio;
+    const y = CHART_PADDING + (innerHeight / 3) * index;
+
+    return { value, y };
+  });
+  const chartPaths = activeKeys.map((key) => {
+    const series = seriesMap[key];
+    const points = series.map((entry, index) => ({
+      x: CHART_PADDING + xStep * index,
+      y: getLabelY(entry.value, minValue, range),
+    }));
+
+    return {
+      key,
+      color: SENSOR_META[key].color,
+      path: getSmoothPath(points),
+      lastPoint: points[points.length - 1],
+      latestEntry: series[series.length - 1],
+    };
+  });
+  const referenceSeries =
+    chartPaths.reduce((selected, entry) => {
+      const currentSeries = seriesMap[entry.key] || [];
+
+      if (!selected || currentSeries.length > selected.length) {
+        return currentSeries;
+      }
+
+      return selected;
+    }, null) || [];
+  const timeAxisLabels = buildTimeAxisLabels(referenceSeries);
+  const xAxisY = CHART_HEIGHT - CHART_PADDING;
+  const chartLabel = `${TREND_METRICS[metricKey].label} trend chart`;
+  const chartIdBase = `print-${metricKey}-trend`;
+
+  const defsMarkup = chartPaths
+    .map(
+      (entry) => `
+        <linearGradient
+          id="${escapeHtml(getChartGradientId(chartIdBase, entry.key))}"
+          x1="0%"
+          x2="100%"
+          y1="0%"
+          y2="0%"
+        >
+          <stop offset="0%" stop-color="${escapeHtml(entry.color)}" stop-opacity="0.35" />
+          <stop offset="50%" stop-color="${escapeHtml(entry.color)}" stop-opacity="1" />
+          <stop offset="100%" stop-color="${escapeHtml(entry.color)}" stop-opacity="0.45" />
+        </linearGradient>`
+    )
+    .join('');
+
+  const guideMarkup = guideLines
+    .map(
+      (line) => `
+        <line
+          x1="${CHART_PADDING}"
+          x2="${CHART_WIDTH - CHART_PADDING}"
+          y1="${line.y}"
+          y2="${line.y}"
+          stroke="rgba(33, 27, 23, 0.16)"
+          stroke-width="1"
+        />`
+    )
+    .join('');
+
+  const scaleMarkup = scaleLabels
+    .map(
+      (scaleLabel) => `
+        <text x="8" y="${scaleLabel.y + 4}" fill="#72665c" font-size="11">
+          ${escapeHtml(formatValue(scaleLabel.value))}
+        </text>`
+    )
+    .join('');
+
+  const timeMarkup = timeAxisLabels
+    .map(
+      (timeLabel) => `
+        <text
+          x="${timeLabel.x}"
+          y="${xAxisY}"
+          fill="#72665c"
+          font-size="11"
+          text-anchor="middle"
+        >
+          ${escapeHtml(timeLabel.label)}
+        </text>`
+    )
+    .join('');
+
+  const pathsMarkup = chartPaths
+    .map(
+      (entry) => `
+        <path
+          d="${escapeHtml(entry.path)}"
+          fill="none"
+          stroke="url(#${escapeHtml(getChartGradientId(chartIdBase, entry.key))})"
+          stroke-width="${entry.key === 'average' ? 2.9 : 1.9}"
+          stroke-opacity="${hasAverageSeries && entry.key !== 'average' ? 0.34 : 0.98}"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />`
+    )
+    .join('');
+
+  const endpointMarkup = chartPaths
+    .filter((entry) => entry.lastPoint)
+    .map((entry) => {
+      return `
+        <circle
+          cx="${entry.lastPoint.x}"
+          cy="${entry.lastPoint.y}"
+          r="${entry.key === 'average' ? 5.5 : 4.5}"
+          fill="${escapeHtml(entry.color)}"
+          opacity="${hasAverageSeries && entry.key !== 'average' ? 0.55 : 1}"
+        />`;
+    })
+    .join('');
+
+  const legendMarkup = activeKeys
+    .map(
+      (key) => `
+        <span class="print-chart-legend-item">
+          <span
+            class="print-chart-legend-swatch"
+            style="background:${escapeHtml(SENSOR_META[key].color)}"
+          ></span>
+          ${escapeHtml(SENSOR_META[key].label)}
+        </span>`
+    )
+    .join('');
+
+  return `
+    <section class="print-chart-section">
+      <div class="print-chart-header">
+        <div>
+          <h2>${escapeHtml(TREND_METRICS[metricKey].label)} trend</h2>
+          <p>Filtered report visualization for the selected time range.</p>
+        </div>
+        <div class="print-chart-legend">${legendMarkup}</div>
+      </div>
+      <div class="print-chart-frame">
+        <svg
+          viewBox="0 0 ${CHART_WIDTH} ${CHART_HEIGHT}"
+          role="img"
+          aria-label="${escapeHtml(chartLabel)}"
+        >
+          <defs>${defsMarkup}</defs>
+          ${guideMarkup}
+          <line
+            x1="${CHART_PADDING}"
+            x2="${CHART_WIDTH - CHART_PADDING}"
+            y1="${xAxisY - CHART_X_AXIS_HEIGHT + 8}"
+            y2="${xAxisY - CHART_X_AXIS_HEIGHT + 8}"
+            stroke="rgba(33, 27, 23, 0.16)"
+            stroke-width="1"
+          />
+          ${scaleMarkup}
+          ${timeMarkup}
+          ${pathsMarkup}
+          ${endpointMarkup}
+        </svg>
+      </div>
+    </section>`;
 }
 
 function openTablePdfWindow({
@@ -391,6 +722,9 @@ function openTablePdfWindow({
   reportDate,
   startTime,
   endTime,
+  metricKey,
+  visibleSensors,
+  showAverage,
 }) {
   const exportWindow = window.open('about:blank', '_blank');
 
@@ -422,6 +756,12 @@ function openTablePdfWindow({
           .join('')}</tr>`
     )
     .join('');
+  const chartMarkup = renderPrintableTrendChartMarkup({
+    readings,
+    metricKey,
+    visibleSensors,
+    showAverage,
+  });
 
   exportWindow.document.write(`<!doctype html>
 <html lang="en">
@@ -448,6 +788,75 @@ function openTablePdfWindow({
         color: #72665c;
         font-size: 14px;
       }
+      h2 {
+        margin: 0 0 6px;
+        font-size: 18px;
+      }
+      .print-chart-section {
+        margin: 0 0 24px;
+      }
+      .print-chart-header {
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .print-chart-header p {
+        margin: 0;
+      }
+      .print-chart-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 14px;
+        justify-content: flex-end;
+        max-width: 360px;
+      }
+      .print-chart-legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #4d4138;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .print-chart-legend-swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+      }
+      .print-chart-frame {
+        border: 1px solid rgba(30, 41, 59, 0.12);
+        border-radius: 16px;
+        padding: 12px;
+        background:
+          radial-gradient(circle at top left, rgba(255, 255, 255, 0.3), transparent 24%),
+          radial-gradient(circle at bottom right, rgba(214, 40, 40, 0.08), transparent 34%),
+          linear-gradient(180deg, rgba(163, 169, 178, 0.96), rgba(128, 135, 145, 0.96)),
+          repeating-linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.2) 0,
+            rgba(255, 255, 255, 0.2) 1px,
+            transparent 1px,
+            transparent 64px
+          );
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+      }
+      .print-chart-frame svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .print-chart-empty {
+        margin: 0 0 24px;
+        padding: 18px;
+        border: 1px solid rgba(33, 27, 23, 0.12);
+        border-radius: 16px;
+        color: #72665c;
+        font-size: 14px;
+        background: #fbf7ef;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -472,6 +881,7 @@ function openTablePdfWindow({
   <body>
     <h1>Wave Trends Table</h1>
     <p>${escapeHtml(summary)}</p>
+    ${chartMarkup}
     <table>
       <thead>
         <tr>${tableHead}</tr>
@@ -498,6 +908,23 @@ function buildDateTimeQueryValue(date, time, fallbackTime) {
   }
 
   return `${date}T${time || fallbackTime}`;
+}
+
+function buildDateTimeQueryIsoValue(date, time, fallbackTime, options = {}) {
+  const { endOfMinute = false } = options;
+  const baseValue = buildDateTimeQueryValue(date, time, fallbackTime);
+
+  if (!baseValue) {
+    return null;
+  }
+
+  const dateTime = new Date(`${baseValue}:${endOfMinute ? '59.999' : '00.000'}`);
+
+  if (Number.isNaN(dateTime.getTime())) {
+    return null;
+  }
+
+  return dateTime.toISOString();
 }
 
 function buildSimulationRange({
@@ -532,15 +959,17 @@ function buildReportFeedUrl({ date, startTime, endTime }) {
   const params = new URLSearchParams({
     limit: String(REPORT_POINTS),
   });
-  const from = buildDateTimeQueryValue(date, startTime, '00:00');
-  const to = buildDateTimeQueryValue(date, endTime, '23:59');
+  const from = buildDateTimeQueryIsoValue(date, startTime, '00:00');
+  const to = buildDateTimeQueryIsoValue(date, endTime, '23:59', {
+    endOfMinute: true,
+  });
 
   if (from) {
     params.set('from', from);
   }
 
   if (to) {
-    params.set('to', `${to}:59`);
+    params.set('to', to);
   }
 
   return `/api/readings/feed?${params.toString()}`;
@@ -556,6 +985,20 @@ function roundMetric(value, digits = 2) {
   }
 
   return Number(value.toFixed(digits));
+}
+
+function createEmptyDisplacementAnalytics() {
+  return {
+    perSensor: SENSOR_KEYS.reduce((result, key) => {
+      result[key] = {
+        currentDisplacementCm: null,
+        maxCrestCm: null,
+        maxTroughCm: null,
+        spanCm: null,
+      };
+      return result;
+    }, {}),
+  };
 }
 
 function randomBetween(min, max) {
@@ -585,89 +1028,60 @@ function createSimulationProfile() {
   };
 }
 
-function buildSimulatedReading(createdAt, index, profile) {
+function buildSimulatedReading(createdAt, index, profile, extremaState) {
   const t = index;
-  const basePeriodSec = profile.periodBase + profile.periodSwing * Math.sin(t / 18 + profile.trendShift);
-  const frequencyHz = 1 / basePeriodSec;
+  const basePeriodSec =
+    profile.periodBase + profile.periodSwing * Math.sin(t / 18 + profile.trendShift);
 
-  const incidentWaveHeight =
-    profile.baseLevel +
-    profile.primaryAmplitude * Math.sin(t / 9 + profile.trendShift) +
-    profile.secondaryAmplitude * Math.sin(t / 3.8 + profile.trendShift * 0.5);
-  const interactionWaveHeight =
-    incidentWaveHeight *
-    (profile.interactionRatioBase +
-      profile.interactionRatioSwing * Math.sin(t / 11 + 0.6 + profile.trendShift));
-  const transmittedWaveHeight =
-    incidentWaveHeight *
-    (profile.transmittedRatioBase +
-      profile.transmittedRatioSwing * Math.sin(t / 13 + 1.2 + profile.trendShift));
-
-  const sensorS1 =
+  const displacementS1 =
     profile.sensorS1Amplitude * Math.sin((2 * Math.PI * t) / basePeriodSec) +
     profile.sensorDrift * Math.sin(t / 2.3 + profile.trendShift);
-  const sensorS2 =
+  const displacementS2 =
     profile.sensorS2Amplitude *
       Math.sin((2 * Math.PI * t) / (basePeriodSec * profile.freqS2Factor) + profile.phaseS2) +
     profile.sensorDrift * 0.82 * Math.sin(t / 2.6 + profile.trendShift * 0.8);
-  const sensorS3 =
+  const displacementS3 =
     profile.sensorS3Amplitude *
       Math.sin((2 * Math.PI * t) / (basePeriodSec * profile.freqS3Factor) + profile.phaseS3) +
     profile.sensorDrift * 0.64 * Math.sin(t / 2.9 + profile.trendShift * 0.65);
+  const displacements = {
+    s1: roundMetric(displacementS1),
+    s2: roundMetric(displacementS2),
+    s3: roundMetric(displacementS3),
+  };
 
-  const reductionEfficiencyPct =
-    ((incidentWaveHeight - transmittedWaveHeight) / incidentWaveHeight) * 100;
-  const transmissionRatio = transmittedWaveHeight / incidentWaveHeight;
-  const interactionChangePct =
-    ((interactionWaveHeight - incidentWaveHeight) / incidentWaveHeight) * 100;
+  const analytics = createEmptyDisplacementAnalytics();
+
+  SENSOR_KEYS.forEach((key) => {
+    const nextValue = displacements[key];
+    const extrema = extremaState[key];
+    extrema.maxCrestCm =
+      typeof extrema.maxCrestCm === 'number'
+        ? Math.max(extrema.maxCrestCm, nextValue)
+        : nextValue;
+    extrema.maxTroughCm =
+      typeof extrema.maxTroughCm === 'number'
+        ? Math.min(extrema.maxTroughCm, nextValue)
+        : nextValue;
+
+    analytics.perSensor[key] = {
+      currentDisplacementCm: nextValue,
+      maxCrestCm: roundMetric(extrema.maxCrestCm),
+      maxTroughCm: roundMetric(extrema.maxTroughCm),
+      spanCm: roundMetric(extrema.maxCrestCm - extrema.maxTroughCm),
+    };
+  });
 
   return {
     id: `sim-${createdAt.toISOString()}`,
     createdAt: createdAt.toISOString(),
     sensors: {
-      s1: roundMetric(sensorS1),
-      s2: roundMetric(sensorS2),
-      s3: roundMetric(sensorS3),
+      s1: roundMetric(profile.baseLevel - displacements.s1),
+      s2: roundMetric(profile.baseLevel - displacements.s2),
+      s3: roundMetric(profile.baseLevel - displacements.s3),
     },
-    analytics: {
-      perSensor: {
-        s1: {
-          amplitudeCm: roundMetric(incidentWaveHeight / 2),
-          waveHeightCm: roundMetric(incidentWaveHeight),
-          waveHeightBandCm: {
-            min: roundMetric(incidentWaveHeight * 0.9),
-            max: roundMetric(incidentWaveHeight * 1.1),
-          },
-          frequencyHz: roundMetric(frequencyHz, 3),
-          periodSec: roundMetric(basePeriodSec, 2),
-        },
-        s2: {
-          amplitudeCm: roundMetric(interactionWaveHeight / 2),
-          waveHeightCm: roundMetric(interactionWaveHeight),
-          waveHeightBandCm: {
-            min: roundMetric(interactionWaveHeight * 0.9),
-            max: roundMetric(interactionWaveHeight * 1.1),
-          },
-          frequencyHz: roundMetric(frequencyHz * 1.02, 3),
-          periodSec: roundMetric(basePeriodSec * 0.98, 2),
-        },
-        s3: {
-          amplitudeCm: roundMetric(transmittedWaveHeight / 2),
-          waveHeightCm: roundMetric(transmittedWaveHeight),
-          waveHeightBandCm: {
-            min: roundMetric(transmittedWaveHeight * 0.9),
-            max: roundMetric(transmittedWaveHeight * 1.1),
-          },
-          frequencyHz: roundMetric(frequencyHz * 0.97, 3),
-          periodSec: roundMetric(basePeriodSec * 1.03, 2),
-        },
-      },
-      breakwater: {
-        reductionEfficiencyPct: roundMetric(reductionEfficiencyPct),
-        transmissionRatio: roundMetric(transmissionRatio, 3),
-        interactionChangePct: roundMetric(interactionChangePct),
-      },
-    },
+    rawSensors: displacements,
+    analytics,
   };
 }
 
@@ -686,10 +1100,14 @@ function buildSimulatedReadings(options = {}) {
     sampleCount,
   });
   const profile = createSimulationProfile();
+  const extremaState = SENSOR_KEYS.reduce((result, key) => {
+    result[key] = { maxCrestCm: null, maxTroughCm: null };
+    return result;
+  }, {});
 
   for (let index = 0; index < sampleCount; index += 1) {
     const createdAt = new Date(simulationRange.start.getTime() + simulationRange.stepMs * index);
-    readings.push(buildSimulatedReading(createdAt, index, profile));
+    readings.push(buildSimulatedReading(createdAt, index, profile, extremaState));
   }
 
   return readings;
@@ -762,7 +1180,7 @@ function buildAverageSeries(readings, visibleSensors) {
       }
 
       const values = included
-        .map((key) => reading.sensors[key])
+        .map((key) => getDisplayedHeightCm(reading.sensors[key]))
         .filter((value) => typeof value === 'number');
 
       if (!values.length) {
@@ -802,11 +1220,32 @@ function buildMetricAverageSeries(readings, visibleSensors, getMetricValue) {
     .filter(Boolean);
 }
 
+function getAverageAnalyticsMetric(analytics, metricKey) {
+  const values = SENSOR_KEYS.map((key) => analytics?.perSensor?.[key]?.[metricKey]).filter(
+    (value) => typeof value === 'number'
+  );
+
+  if (!values.length) {
+    return null;
+  }
+
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
 function buildSeries(readings, key) {
   return readings
     .map((reading) => ({
       createdAt: reading.createdAt,
-      value: reading.sensors[key],
+      value: getDisplayedHeightCm(reading.sensors[key]),
+    }))
+    .filter((entry) => typeof entry.value === 'number');
+}
+
+function buildDisplacementSeries(readings, key) {
+  return readings
+    .map((reading) => ({
+      createdAt: reading.createdAt,
+      value: reading?.analytics?.perSensor?.[key]?.currentDisplacementCm,
     }))
     .filter((entry) => typeof entry.value === 'number');
 }
@@ -993,6 +1432,9 @@ function LineChart({ seriesMap, label, emptyMessage, showValueLabels = true }) {
         aria-label={label}
       >
         <defs>
+          <filter id={`${label}-endpoint-glow`} x="-200%" y="-200%" width="400%" height="400%">
+            <feDropShadow dx="0" dy="0" stdDeviation="6" floodColor="rgba(255,255,255,0.85)" />
+          </filter>
           {chartPaths.map((entry) => (
             <linearGradient
               key={`${entry.key}-gradient`}
@@ -1056,9 +1498,10 @@ function LineChart({ seriesMap, label, emptyMessage, showValueLabels = true }) {
             key={entry.key}
             d={entry.path}
             fill="none"
+            className={`chart-line ${entry.key === 'average' ? 'chart-line-average' : 'chart-line-sensor'}`}
             stroke={`url(#${getChartGradientId(label, entry.key)})`}
-            strokeWidth={entry.key === 'average' ? 3 : 2}
-            strokeOpacity={hasAverageSeries && entry.key !== 'average' ? 0.3 : 1}
+            strokeWidth={entry.key === 'average' ? 2.9 : 1.9}
+            strokeOpacity={hasAverageSeries && entry.key !== 'average' ? 0.34 : 0.98}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -1079,6 +1522,7 @@ function LineChart({ seriesMap, label, emptyMessage, showValueLabels = true }) {
                   fill={entry.color}
                   opacity={hasAverageSeries && entry.key !== 'average' ? 0.55 : 1}
                   className="chart-endpoint"
+                  filter={`url(#${label}-endpoint-glow)`}
                 />
                 <text
                   x={labelPosition.x}
@@ -1107,13 +1551,17 @@ function WaveChart({
   showValueLabels,
 }) {
   const seriesMap = {
-    s1: buildSeries(readings, 's1'),
-    s2: buildSeries(readings, 's2'),
-    s3: buildSeries(readings, 's3'),
+    s1: buildDisplacementSeries(readings, 's1'),
+    s2: buildDisplacementSeries(readings, 's2'),
+    s3: buildDisplacementSeries(readings, 's3'),
   };
 
   if (showAverage) {
-    seriesMap.average = buildAverageSeries(readings, visibleSensors);
+    seriesMap.average = buildMetricAverageSeries(
+      readings,
+      visibleSensors,
+      (reading, key) => reading?.analytics?.perSensor?.[key]?.currentDisplacementCm
+    );
   }
 
   const activeSeriesMap = Object.fromEntries(
@@ -1125,8 +1573,8 @@ function WaveChart({
   return (
     <LineChart
       seriesMap={activeSeriesMap}
-      label="Live sensor wave chart"
-      emptyMessage="Enable at least one sensor to draw the live wave."
+      label="Live displacement chart"
+      emptyMessage="Enable at least one sensor to draw the live displacement trend."
       showValueLabels={showValueLabels}
     />
   );
@@ -1187,7 +1635,7 @@ function SensorCard({ sensorKey, latest, history, enabled, isAlarmed }) {
             color: isAlarmed ? '#b22222' : SENSOR_META[sensorKey].color,
           }}
         >
-          {isAlarmed ? 'Alarm' : enabled ? 'Visible' : 'Hidden'}
+          {isAlarmed ? 'Alarm' : enabled ? 'Active' : 'Disabled'}
         </span>
       </header>
 
@@ -1196,7 +1644,7 @@ function SensorCard({ sensorKey, latest, history, enabled, isAlarmed }) {
       </div>
 
       <div className="history-block">
-        <h3>Recent readings</h3>
+        <h3>Actual heights (cm)</h3>
         <ul className="history-list">
           {history.length ? (
             history
@@ -1235,7 +1683,7 @@ function ParametersModal({ analytics, onClose }) {
         className="app-modal-panel app-modal-panel-wide"
       >
         <div className="app-modal-header">
-          <h2 className="app-modal-title">Breakwater Wave Parameters</h2>
+          <h2 className="app-modal-title">Displacement Summary</h2>
           <button
             type="button"
             className="toggle"
@@ -1250,20 +1698,20 @@ function ParametersModal({ analytics, onClose }) {
             <thead>
               <tr>
                 <th>Sensor</th>
-                <th>Height (cm)</th>
-                <th>Height Band ±10%</th>
-                <th>Frequency (Hz)</th>
-                <th>Period (s)</th>
+                <th>Current Disp. (cm)</th>
+                <th>Max Crest (cm)</th>
+                <th>Max Trough (cm)</th>
+                <th>Span (cm)</th>
               </tr>
             </thead>
             <tbody>
               {SENSOR_KEYS.map((key) => (
                 <tr key={`modal-row-${key}`}>
                   <td>{`${SENSOR_META[key].shortLabel} · ${SENSOR_META[key].label}`}</td>
-                  <td>{formatValue(analytics?.perSensor?.[key]?.waveHeightCm)}</td>
-                  <td>{formatRange(analytics?.perSensor?.[key]?.waveHeightBandCm, 'cm')}</td>
-                  <td>{formatValue(analytics?.perSensor?.[key]?.frequencyHz)}</td>
-                  <td>{formatValue(analytics?.perSensor?.[key]?.periodSec)}</td>
+                  <td>{formatValue(analytics?.perSensor?.[key]?.currentDisplacementCm)}</td>
+                  <td>{formatValue(analytics?.perSensor?.[key]?.maxCrestCm)}</td>
+                  <td>{formatValue(analytics?.perSensor?.[key]?.maxTroughCm)}</td>
+                  <td>{formatValue(analytics?.perSensor?.[key]?.spanCm)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1271,7 +1719,7 @@ function ParametersModal({ analytics, onClose }) {
         </div>
 
         <p className="app-modal-footer-note">
-          Reduction efficiency: {formatMetricValue(analytics?.breakwater?.reductionEfficiencyPct, '%')} | Transmission ratio: {formatValue(analytics?.breakwater?.transmissionRatio)} | Interaction change: {formatMetricValue(analytics?.breakwater?.interactionChangePct, '%')}
+          Average crest: {formatMetricValue(getAverageAnalyticsMetric(analytics, 'maxCrestCm'), 'cm')} | Average trough: {formatMetricValue(getAverageAnalyticsMetric(analytics, 'maxTroughCm'), 'cm')} | Average span: {formatMetricValue(getAverageAnalyticsMetric(analytics, 'spanCm'), 'cm')}
         </p>
       </div>
     </section>
@@ -1288,45 +1736,19 @@ function TableColumnsModal({ columnGroups, onClose, onResetDefaults, onToggleGro
       aria-modal="true"
       aria-label="Trend table column controls"
       onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 1200,
-        background: 'rgba(21, 18, 15, 0.58)',
-        display: 'grid',
-        placeItems: 'center',
-        padding: 20,
-      }}
+      className="app-modal-overlay"
     >
       <div
         onClick={(event) => event.stopPropagation()}
-        style={{
-          width: 'min(640px, 100%)',
-          maxHeight: '80vh',
-          overflowY: 'auto',
-          background: 'rgba(255, 253, 248, 0.98)',
-          border: '1px solid rgba(33, 27, 23, 0.1)',
-          borderRadius: 20,
-          boxShadow: '0 24px 70px rgba(26, 15, 9, 0.2)',
-          padding: 20,
-        }}
+        className="app-modal-panel"
       >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 10,
-            marginBottom: 14,
-          }}
-        >
-          <h2 style={{ margin: 0, fontSize: '1.4rem' }}>Trend Table Columns</h2>
+        <div className="app-modal-header">
+          <h2 className="app-modal-title">Trend Table Columns</h2>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             <button
               type="button"
               className="toggle"
               onClick={onResetDefaults}
-              style={{ cursor: 'pointer' }}
             >
               Default
             </button>
@@ -1334,7 +1756,6 @@ function TableColumnsModal({ columnGroups, onClose, onResetDefaults, onToggleGro
               type="button"
               className="toggle"
               onClick={onClose}
-              style={{ cursor: 'pointer' }}
             >
               Close
             </button>
@@ -1450,14 +1871,14 @@ function Navigation({ page, onNavigate }) {
         className={`nav-link ${page === 'dashboard' ? 'nav-link-active' : ''}`}
         onClick={() => onNavigate('dashboard')}
       >
-        Dashboard
+        Overview
       </button>
       <button
         type="button"
         className={`nav-link ${page === 'trends' ? 'nav-link-active' : ''}`}
         onClick={() => onNavigate('trends')}
       >
-        Trends Report
+        Insights
       </button>
     </nav>
   );
@@ -1466,6 +1887,8 @@ function Navigation({ page, onNavigate }) {
 function ThemePicker({ theme, onThemeChange }) {
   const [isOpen, setIsOpen] = useState(false);
   const rootRef = useRef(null);
+  const menuRef = useRef(null);
+  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
   const activeTheme =
     THEME_OPTIONS.find((option) => option.key === theme) || THEME_OPTIONS[0];
 
@@ -1475,7 +1898,9 @@ function ThemePicker({ theme, onThemeChange }) {
     }
 
     const handlePointerDown = (event) => {
-      if (!rootRef.current?.contains(event.target)) {
+      const target = event.target;
+
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) {
         setIsOpen(false);
       }
     };
@@ -1495,6 +1920,41 @@ function ThemePicker({ theme, onThemeChange }) {
     };
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+
+    const updatePosition = () => {
+      const triggerRect = rootRef.current?.getBoundingClientRect();
+      const menuWidth = Math.min(180, window.innerWidth - 24);
+
+      if (!triggerRect) {
+        return;
+      }
+
+      const nextLeft = Math.min(
+        Math.max(12, triggerRect.right - menuWidth),
+        window.innerWidth - menuWidth - 12
+      );
+      const nextTop = Math.min(triggerRect.bottom + 10, window.innerHeight - 12);
+
+      setMenuPosition({
+        left: nextLeft,
+        top: nextTop,
+      });
+    };
+
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [isOpen]);
+
   return (
     <div ref={rootRef} className="theme-picker" aria-label="Color theme">
       <button
@@ -1511,25 +1971,35 @@ function ThemePicker({ theme, onThemeChange }) {
       </button>
 
       {isOpen ? (
-        <div className="theme-menu">
-          {THEME_OPTIONS.map((option) => (
-            <button
-              key={option.key}
-              type="button"
-              className={`theme-option ${theme === option.key ? 'theme-option-active' : ''}`}
-              onClick={() => {
-                onThemeChange(option.key);
-                setIsOpen(false);
-              }}
-            >
-              <span
-                className="theme-dot"
-                style={{ backgroundColor: option.swatch }}
-              />
-              <span>{option.label}</span>
-            </button>
-          ))}
-        </div>
+        createPortal(
+          <div
+            ref={menuRef}
+            className="theme-menu theme-menu-portal"
+            style={{
+              left: `${menuPosition.left}px`,
+              top: `${menuPosition.top}px`,
+            }}
+          >
+            {THEME_OPTIONS.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className={`theme-option ${theme === option.key ? 'theme-option-active' : ''}`}
+                onClick={() => {
+                  onThemeChange(option.key);
+                  setIsOpen(false);
+                }}
+              >
+                <span
+                  className="theme-dot"
+                  style={{ backgroundColor: option.swatch }}
+                />
+                <span>{option.label}</span>
+              </button>
+            ))}
+          </div>,
+          document.body
+        )
       ) : null}
     </div>
   );
@@ -1586,6 +2056,7 @@ function TopBar({ page, onNavigate, theme, onThemeChange }) {
 
 function DashboardPage({
   analytics,
+  calibrationStatus,
   connectionStatus,
   historyBySensor,
   lastUpdated,
@@ -1598,10 +2069,25 @@ function DashboardPage({
   visibleSensors,
   onCloseModal,
   onOpenModal,
+  onRecalibrate,
   onToggleAverage,
   onToggleSensor,
   onToggleValueLabels,
+  recalibrationPending,
+  serialRuntimeStatus,
 }) {
+  const averageDisplacement = getAverageAnalyticsMetric(
+    analytics,
+    'currentDisplacementCm'
+  );
+  const averageCrest = getAverageAnalyticsMetric(analytics, 'maxCrestCm');
+  const averageTrough = getAverageAnalyticsMetric(analytics, 'maxTroughCm');
+  const averageSpan = getAverageAnalyticsMetric(analytics, 'spanCm');
+  const sensorSystemStatus = getSensorSystemStatus(calibrationStatus, serialRuntimeStatus);
+  const showRecalibrateControl =
+    calibrationStatus?.source !== 'arduino' &&
+    calibrationStatus?.source !== 'raw';
+
   return (
     <>
       <section className="hero hero-surface">
@@ -1622,38 +2108,51 @@ function DashboardPage({
           <span className="status-label">Last update</span>
           <strong>{lastUpdated}</strong>
         </div>
+        <div>
+          <span className="status-label">Sensor status</span>
+          <strong>{sensorSystemStatus.label}</strong>
+          <span className="status-detail">{sensorSystemStatus.detail}</span>
+        </div>
       </section>
 
-      <section className="metrics-grid">
+      <section className="metrics-grid dashboard-metrics-grid">
         <article className="sensor-card">
-          <p className="sensor-label">Incident wave height</p>
-          <h3 className="sensor-name">{formatValue(analytics?.perSensor?.s1?.waveHeightCm)} cm</h3>
+          <p className="sensor-label">Sensor 1 displacement</p>
+          <h3 className="sensor-name">{formatMetricValue(analytics?.perSensor?.s1?.currentDisplacementCm, 'cm')}</h3>
           <p className="subtitle compact-subtitle">
             {`Sensor: ${SENSOR_META.s1.label}`}
           </p>
         </article>
 
         <article className="sensor-card">
-          <p className="sensor-label">Transmitted wave height</p>
-          <h3 className="sensor-name">{formatValue(analytics?.perSensor?.s3?.waveHeightCm)} cm</h3>
+          <p className="sensor-label">Sensor 2 displacement</p>
+          <h3 className="sensor-name">{formatMetricValue(analytics?.perSensor?.s2?.currentDisplacementCm, 'cm')}</h3>
+          <p className="subtitle compact-subtitle">
+            {`Sensor: ${SENSOR_META.s2.label}`}
+          </p>
+        </article>
+
+        <article className="sensor-card">
+          <p className="sensor-label">Sensor 3   displacement</p>
+          <h3 className="sensor-name">{formatMetricValue(analytics?.perSensor?.s3?.currentDisplacementCm, 'cm')}</h3>
           <p className="subtitle compact-subtitle">
             {`Sensor: ${SENSOR_META.s3.label}`}
           </p>
         </article>
 
         <article className="sensor-card">
-          <p className="sensor-label">Reduction efficiency</p>
-          <h3 className="sensor-name">{formatMetricValue(analytics?.breakwater?.reductionEfficiencyPct, '%')}</h3>
+          <p className="sensor-label">Average max crest</p>
+          <h3 className="sensor-name">{formatMetricValue(averageCrest, 'cm')}</h3>
           <p className="subtitle compact-subtitle">
-            Transmission ratio: {formatValue(analytics?.breakwater?.transmissionRatio)}
+            Average current displacement: {formatMetricValue(averageDisplacement, 'cm')}
           </p>
         </article>
 
         <article className="sensor-card">
-          <p className="sensor-label">Interaction zone change</p>
-          <h3 className="sensor-name">{formatMetricValue(analytics?.breakwater?.interactionChangePct, '%')}</h3>
+          <p className="sensor-label">Average max trough</p>
+          <h3 className="sensor-name">{formatMetricValue(averageTrough, 'cm')}</h3>
           <p className="subtitle compact-subtitle">
-            {`Wave height: ${formatMetricValue(analytics?.perSensor?.s2?.waveHeightCm, 'cm')}`}
+            Average span: {formatMetricValue(averageSpan, 'cm')}
           </p>
         </article>
       </section>
@@ -1665,8 +2164,18 @@ function DashboardPage({
           onClick={onOpenModal}
           style={{ cursor: 'pointer' }}
         >
-          View Breakwater Parameters
+          View Displacement Summary
         </button>
+        {showRecalibrateControl ? (
+          <button
+            type="button"
+            className="toggle action-button"
+            onClick={onRecalibrate}
+            disabled={recalibrationPending || calibrationStatus?.active || !serialRuntimeStatus?.connected}
+          >
+            {recalibrationPending ? 'Recalibrating...' : 'Recalibrate baseline'}
+          </button>
+        ) : null}
       </div>
 
       {showParametersModal ? (
@@ -1682,7 +2191,9 @@ function DashboardPage({
               {triggeredSensors
                 .map(
                   (key) =>
-                    `${SENSOR_META[key].label} at ${formatValue(latest.sensors[key])}`
+                    `${SENSOR_META[key].label} at ${formatValue(
+                      getDisplayedHeightCm(latest.sensors[key])
+                    )}`
                 )
                 .join(' • ')}
               {` (threshold: ${LOW_SENSOR_THRESHOLD} and below)`}
@@ -1754,7 +2265,7 @@ function DashboardPage({
           <SensorCard
             key={sensorKey}
             sensorKey={sensorKey}
-            latest={latest?.sensors?.[sensorKey]}
+            latest={getDisplayedHeightCm(latest?.sensors?.[sensorKey])}
             history={historyBySensor[sensorKey] || []}
             enabled={visibleSensors[sensorKey]}
             isAlarmed={triggeredSensors.includes(sensorKey)}
@@ -1850,17 +2361,17 @@ function TrendsPage({
           <p className="subtitle compact-subtitle">{`Showing ${tablePageSize} rows max per page from ${tableReadings.length} total`}</p>
         </article>
         <article className="sensor-card">
-          <p className="sensor-label">Current reduction efficiency</p>
-          <h3 className="sensor-name">{formatMetricValue(latestAnalytics?.breakwater?.reductionEfficiencyPct, '%')}</h3>
+          <p className="sensor-label">Average max crest</p>
+          <h3 className="sensor-name">{formatMetricValue(getAverageAnalyticsMetric(latestAnalytics, 'maxCrestCm'), 'cm')}</h3>
           <p className="subtitle compact-subtitle">
-            Transmission ratio: {formatValue(latestAnalytics?.breakwater?.transmissionRatio)}
+            Selected metric: {TREND_METRICS[metricKey].label}
           </p>
         </article>
         <article className="sensor-card">
-          <p className="sensor-label">Current interaction change</p>
-          <h3 className="sensor-name">{formatMetricValue(latestAnalytics?.breakwater?.interactionChangePct, '%')}</h3>
+          <p className="sensor-label">Average max trough</p>
+          <h3 className="sensor-name">{formatMetricValue(getAverageAnalyticsMetric(latestAnalytics, 'maxTroughCm'), 'cm')}</h3>
           <p className="subtitle compact-subtitle">
-            Selected metric: {TREND_METRICS[metricKey].label}
+            Average span: {formatMetricValue(getAverageAnalyticsMetric(latestAnalytics, 'spanCm'), 'cm')}
           </p>
         </article>
       </section>
@@ -1955,6 +2466,9 @@ function TrendsPage({
                 onSaveTablePdf({
                   columns: visibleTableColumns,
                   readings: tableReadings.slice().reverse(),
+                  metricKey,
+                  visibleSensors,
+                  showAverage,
                 })
               }
             >
@@ -2029,7 +2543,7 @@ function TrendsPage({
         <div className="chart-panel-header">
           <div>
             <p className="sensor-label">Trend table</p>
-            <h2 className="chart-title">Timestamped breakwater parameters</h2>
+            <h2 className="chart-title">Timestamped displacement records</h2>
           </div>
           <div className="table-controls">
             <button
@@ -2048,6 +2562,8 @@ function TrendsPage({
               >
                 <option value="10">10</option>
                 <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
               </select>
             </label>
 
@@ -2125,9 +2641,9 @@ function TrendsPage({
 export default function App() {
   const [theme, setTheme] = useState(() => {
     try {
-      return localStorage.getItem('ce-theme') || 'sage';
+      return localStorage.getItem('ce-theme') || 'black';
     } catch {
-      return 'sage';
+      return 'black';
     }
   });
   const [page, setPage] = useState(() => getRouteFromLocation());
@@ -2135,16 +2651,19 @@ export default function App() {
   const [pageTransitionStage, setPageTransitionStage] = useState('idle');
   const [readings, setReadings] = useState([]);
   const [reportReadings, setReportReadings] = useState([]);
-  const [analytics, setAnalytics] = useState(null);
+  const [analytics, setAnalytics] = useState(createEmptyDisplacementAnalytics);
   const [isSimulationMode, setIsSimulationMode] = useState(false);
-  const [trendMetric, setTrendMetric] = useState('sensor');
+  const [trendMetric, setTrendMetric] = useState('displacement');
   const [reportDate, setReportDate] = useState(() => getLocalDateInputValue());
   const [reportStartTime, setReportStartTime] = useState('00:00');
   const [reportEndTime, setReportEndTime] = useState('23:59');
   const [showParametersModal, setShowParametersModal] = useState(false);
+  const [calibrationStatus, setCalibrationStatus] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('Connecting...');
   const [lastUpdated, setLastUpdated] = useState('Waiting for data');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [serialRuntimeStatus, setSerialRuntimeStatus] = useState(null);
+  const [recalibrationPending, setRecalibrationPending] = useState(false);
   const [toast, setToast] = useState(null);
   const [visibleSensors, setVisibleSensors] = useState({
     s1: true,
@@ -2175,7 +2694,7 @@ export default function App() {
 
   const muiTheme = useMemo(
     () => {
-      const tokens = MUI_THEME_TOKENS[theme] || MUI_THEME_TOKENS.sage;
+      const tokens = MUI_THEME_TOKENS[theme] || MUI_THEME_TOKENS.black;
 
       return createTheme({
         palette: {
@@ -2420,10 +2939,11 @@ export default function App() {
 
       if (fullReportReadings.length) {
         const latestReading = fullReportReadings[fullReportReadings.length - 1];
-        setAnalytics(latestReading.analytics || null);
+        setAnalytics(latestReading.analytics || createEmptyDisplacementAnalytics());
         setLastUpdated(formatTimestamp(latestReading.createdAt));
         setConnectionStatus('Showing saved database readings');
       } else {
+        setAnalytics(createEmptyDisplacementAnalytics());
         setConnectionStatus('No saved records found for the selected date and time range');
         if (notifyOnEmpty) {
           setToast({
@@ -2434,6 +2954,7 @@ export default function App() {
         }
       }
     } catch (error) {
+      setAnalytics(createEmptyDisplacementAnalytics());
       setConnectionStatus('History unavailable');
       setLastUpdated(error.message);
       if (notifyOnError) {
@@ -2461,7 +2982,10 @@ export default function App() {
       await syncReadingsFromDatabase(options);
     };
 
-    guardedSync();
+    guardedSync({
+      notifyOnEmpty: false,
+      notifyOnError: false,
+    });
     const refreshTimerId = window.setInterval(
       () => {
         guardedSync({ silent: true });
@@ -2506,7 +3030,7 @@ export default function App() {
 
       setReadings((current) => appendUniqueReading(current, reading, MAX_POINTS));
       setReportReadings((current) => appendUniqueReading(current, reading, REPORT_POINTS));
-      setAnalytics(reading.analytics || null);
+      setAnalytics(reading.analytics || createEmptyDisplacementAnalytics());
       setLastUpdated(formatTimestamp(reading.createdAt));
     });
 
@@ -2521,7 +3045,7 @@ export default function App() {
 
       setReadings((current) => appendUniqueReading(current, reading, MAX_POINTS));
       setReportReadings((current) => appendUniqueReading(current, reading, REPORT_POINTS));
-      setAnalytics(reading.analytics || null);
+      setAnalytics(reading.analytics || createEmptyDisplacementAnalytics());
       setLastUpdated(formatTimestamp(reading.createdAt));
       setConnectionStatus('Streaming live data');
     });
@@ -2533,6 +3057,22 @@ export default function App() {
 
       setConnectionStatus('Socket error');
       setLastUpdated(payload?.message || 'Unknown socket error');
+    });
+
+    socket.on('calibration:status', (status) => {
+      if (!active) {
+        return;
+      }
+
+      setCalibrationStatus(status || null);
+    });
+
+    socket.on('serial:status', (status) => {
+      if (!active) {
+        return;
+      }
+
+      setSerialRuntimeStatus(status || null);
     });
 
     return () => {
@@ -2548,7 +3088,7 @@ export default function App() {
   const historyBySensor = SENSOR_KEYS.reduce((result, key) => {
     result[key] = readings
       .map((reading) => ({
-        value: reading.sensors[key],
+        value: getDisplayedHeightCm(reading.sensors[key]),
         createdAt: reading.createdAt,
       }))
       .filter((entry) => typeof entry.value === 'number');
@@ -2618,10 +3158,10 @@ export default function App() {
     const latestReading = simulatedReadings[simulatedReadings.length - 1] || null;
 
     setIsSimulationMode(true);
-    setTrendMetric('waveHeightCm');
+    setTrendMetric('displacement');
     setReadings(clampFeed(simulatedReadings, MAX_POINTS));
     setReportReadings(clampFeed(simulatedReadings, REPORT_POINTS));
-    setAnalytics(latestReading?.analytics || null);
+    setAnalytics(latestReading?.analytics || createEmptyDisplacementAnalytics());
     setConnectionStatus('Showing simulated trend data');
     setLastUpdated(latestReading ? formatTimestamp(latestReading.createdAt) : 'Simulation ready');
     setPage('trends');
@@ -2638,6 +3178,36 @@ export default function App() {
       notifyOnEmpty: false,
       notifyOnError: false,
     });
+  };
+
+  const handleRecalibrate = async () => {
+    setRecalibrationPending(true);
+
+    try {
+      const response = await fetch('/api/calibration/node/start', {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to restart baseline calibration');
+      }
+
+      const payload = await response.json();
+      setCalibrationStatus(payload.calibration || null);
+      setToast({
+        kind: 'info',
+        title: 'Calibration restarted',
+        message: payload.message || 'The sensors are collecting a fresh baseline now.',
+      });
+    } catch (error) {
+      setToast({
+        kind: 'error',
+        title: 'Calibration failed',
+        message: error.message || 'The baseline could not be restarted right now.',
+      });
+    } finally {
+      setRecalibrationPending(false);
+    }
   };
 
   return (
@@ -2685,13 +3255,16 @@ export default function App() {
               }))
             }
             onToggleValueLabels={setShowValueLabels}
-            onSaveTablePdf={({ columns, readings }) =>
+            onSaveTablePdf={({ columns, readings, metricKey, visibleSensors, showAverage }) =>
               openTablePdfWindow({
                 columns,
                 readings,
                 reportDate,
                 startTime: reportStartTime,
                 endTime: reportEndTime,
+                metricKey,
+                visibleSensors,
+                showAverage,
               })
             }
             onStartSimulation={handleStartSimulation}
@@ -2700,6 +3273,7 @@ export default function App() {
           ) : (
             <DashboardPage
             analytics={analytics}
+            calibrationStatus={calibrationStatus}
             connectionStatus={connectionStatus}
             historyBySensor={historyBySensor}
             lastUpdated={lastUpdated}
@@ -2712,6 +3286,7 @@ export default function App() {
             visibleSensors={visibleSensors}
             onCloseModal={() => setShowParametersModal(false)}
             onOpenModal={() => setShowParametersModal(true)}
+            onRecalibrate={handleRecalibrate}
             onToggleAverage={setShowAverage}
             onToggleSensor={(key, checked) =>
               setVisibleSensors((current) => ({
@@ -2720,6 +3295,8 @@ export default function App() {
               }))
             }
             onToggleValueLabels={setShowValueLabels}
+            recalibrationPending={recalibrationPending}
+            serialRuntimeStatus={serialRuntimeStatus}
             />
           )}
         </div>

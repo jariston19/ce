@@ -17,31 +17,59 @@ const MONGODB_DB = process.env.MONGODB_DB || 'sensor_monitor';
 const MONGODB_COLLECTION =
   process.env.MONGODB_COLLECTION || 'sensor_readings';
 const HISTORY_LIMIT = Number(process.env.HISTORY_LIMIT || 40);
-const NODE_CALIBRATION_SAMPLES = Number(
-  process.env.NODE_CALIBRATION_SAMPLES || 30
+const SENSOR_MIN_DISTANCE_CM = Number(
+  process.env.SENSOR_MIN_DISTANCE_CM || 0
 );
-const NODE_OUTPUT_DEADBAND_CM_S1 = Number(
-  process.env.NODE_OUTPUT_DEADBAND_CM_S1 || 0.2
+const SENSOR_MAX_DISTANCE_CM = Number(
+  process.env.SENSOR_MAX_DISTANCE_CM || 400
 );
-const NODE_OUTPUT_DEADBAND_CM_S2 = Number(
-  process.env.NODE_OUTPUT_DEADBAND_CM_S2 || 0.2
-);
-const NODE_OUTPUT_DEADBAND_CM_S3 = Number(
-  process.env.NODE_OUTPUT_DEADBAND_CM_S3 || 0.2
-);
-const NODE_EMA_ALPHA = Number(process.env.NODE_EMA_ALPHA || 0.28);
-const ANALYTICS_WINDOW = Number(process.env.ANALYTICS_WINDOW || 80);
-const PEAK_MIN_ABS_CM = Number(process.env.PEAK_MIN_ABS_CM || 0.5);
+const RESET_READINGS_ON_START =
+  process.env.RESET_READINGS_ON_START === 'true';
 const SERIAL_ENABLED = process.env.SERIAL_ENABLED !== 'false';
 
 const DIST_DIR = path.join(__dirname, 'dist');
 const SENSOR_KEYS = ['s1', 's2', 's3'];
 
+function createEmptySensorMap(defaultValue = null) {
+  return SENSOR_KEYS.reduce((result, key) => {
+    result[key] = defaultValue;
+    return result;
+  }, {});
+}
+
+function createCalibrationState() {
+  return {
+    source: 'arduino',
+    active: true,
+    phase: 'startup',
+    baseline: createEmptySensorMap(),
+    completedAt: null,
+    detail: 'Waiting for Arduino calibration status.',
+  };
+}
+
+function createEmptyAnalytics() {
+  return {
+    perSensor: SENSOR_KEYS.reduce((result, key) => {
+      result[key] = {
+        currentDisplacementCm: null,
+        maxCrestCm: null,
+        maxTroughCm: null,
+        spanCm: null,
+      };
+      return result;
+    }, {}),
+  };
+}
+
 let readingsCollection;
 let io;
-let nodeCalibration = createCalibrationState();
+let calibrationState = createCalibrationState();
 let currentAnalytics = createEmptyAnalytics();
-const nodeFilterState = { s1: 0, s2: 0, s3: 0 };
+const sessionExtrema = SENSOR_KEYS.reduce((result, key) => {
+  result[key] = { maxCrestCm: null, maxTroughCm: null };
+  return result;
+}, {});
 let serialStatus = {
   enabled: SERIAL_ENABLED,
   connected: false,
@@ -50,10 +78,77 @@ let serialStatus = {
   message: SERIAL_ENABLED ? 'Serial not started yet' : 'Serial disabled',
 };
 
-const analyticsState = {
-  series: { s1: [], s2: [], s3: [] },
-  peakTimes: { s1: [], s2: [], s3: [] },
-};
+function emitSerialStatus() {
+  if (io) {
+    io.emit('serial:status', serialStatus);
+  }
+}
+
+function getCalibrationStatus() {
+  return calibrationState;
+}
+
+function emitCalibrationStatus() {
+  if (io) {
+    io.emit('calibration:status', getCalibrationStatus());
+  }
+}
+
+function resetCalibrationState() {
+  calibrationState = createCalibrationState();
+}
+
+function resetAnalyticsState() {
+  currentAnalytics = createEmptyAnalytics();
+
+  for (const key of SENSOR_KEYS) {
+    sessionExtrema[key] = {
+      maxCrestCm: null,
+      maxTroughCm: null,
+    };
+  }
+}
+
+function isValidSensorValue(value) {
+  return (
+    Number.isFinite(value) &&
+    value >= SENSOR_MIN_DISTANCE_CM &&
+    value <= SENSOR_MAX_DISTANCE_CM
+  );
+}
+
+function isValidActualHeightValue(value) {
+  return value === null || isValidSensorValue(value);
+}
+
+function getInvalidSensorKeys(sensors) {
+  return SENSOR_KEYS.filter((key) => !isValidSensorValue(sensors[key]));
+}
+
+function isValidSensorSample(sensors) {
+  return getInvalidSensorKeys(sensors).length === 0;
+}
+
+function isFiniteSensorSample(sensors) {
+  return SENSOR_KEYS.every((key) => Number.isFinite(sensors[key]));
+}
+
+function hasBaselineForSensor(key) {
+  return Number.isFinite(calibrationState.baseline[key]);
+}
+
+function hasBaseline() {
+  return SENSOR_KEYS.every((key) => hasBaselineForSensor(key));
+}
+
+function translateToActualHeights(sensors) {
+  return SENSOR_KEYS.reduce((result, key) => {
+    result[key] = hasBaselineForSensor(key)
+      ? Number((calibrationState.baseline[key] + sensors[key]).toFixed(4))
+      : null;
+    return result;
+  }, {});
+}
 
 function round(value, digits = 4) {
   if (!Number.isFinite(value)) {
@@ -64,226 +159,166 @@ function round(value, digits = 4) {
   return Math.round(value * factor) / factor;
 }
 
-function pushLimited(array, value, limit) {
-  array.push(value);
-  if (array.length > limit) {
-    array.shift();
-  }
-}
-
-function createEmptyAnalytics() {
-  return {
-    perSensor: {
-      s1: { amplitudeCm: null, waveHeightCm: null, waveHeightBandCm: null, frequencyHz: null, periodSec: null },
-      s2: { amplitudeCm: null, waveHeightCm: null, waveHeightBandCm: null, frequencyHz: null, periodSec: null },
-      s3: { amplitudeCm: null, waveHeightCm: null, waveHeightBandCm: null, frequencyHz: null, periodSec: null },
-    },
-    breakwater: {
-      reductionEfficiencyPct: null,
-      transmissionRatio: null,
-      interactionChangePct: null,
-    },
-  };
-}
-
-function average(numbers) {
-  if (!numbers.length) {
-    return null;
-  }
-
-  return numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
-}
-
-function getAveragePeriodFromPeaks(peakTimes) {
-  if (peakTimes.length < 2) {
-    return null;
-  }
-
-  const intervals = [];
-  for (let index = 1; index < peakTimes.length; index += 1) {
-    const interval = peakTimes[index] - peakTimes[index - 1];
-    if (interval > 0) {
-      intervals.push(interval);
-    }
-  }
-
-  return average(intervals);
-}
-
-function detectPeak(key) {
-  const samples = analyticsState.series[key];
-  if (samples.length < 3) {
-    return;
-  }
-
-  const a = samples[samples.length - 3];
-  const b = samples[samples.length - 2];
-  const c = samples[samples.length - 1];
-
-  const isPeak = b.value > a.value && b.value >= c.value && Math.abs(b.value) >= PEAK_MIN_ABS_CM;
-  if (!isPeak) {
-    return;
-  }
-
-  const peaks = analyticsState.peakTimes[key];
-  const lastPeak = peaks[peaks.length - 1];
-
-  if (!lastPeak || b.timeSec - lastPeak >= 0.08) {
-    pushLimited(peaks, b.timeSec, ANALYTICS_WINDOW);
-  }
-}
-
-function updateAnalytics(sensors, createdAt) {
-  const timeSec = createdAt.getTime() / 1000;
+function updateDisplacementAnalytics(displacements) {
+  const analytics = createEmptyAnalytics();
 
   for (const key of SENSOR_KEYS) {
-    pushLimited(
-      analyticsState.series[key],
-      { timeSec, value: sensors[key] },
-      ANALYTICS_WINDOW
-    );
-    detectPeak(key);
-  }
+    const displacement = displacements[key];
+    const extrema = sessionExtrema[key];
 
-  const nextAnalytics = createEmptyAnalytics();
-
-  for (const key of SENSOR_KEYS) {
-    const values = analyticsState.series[key].map((entry) => entry.value);
-    if (!values.length) {
+    if (!Number.isFinite(displacement)) {
+      analytics.perSensor[key] = { ...extrema, currentDisplacementCm: null, spanCm: null };
       continue;
     }
 
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const amplitudeCm = (max - min) / 2;
-    const waveHeightCm = amplitudeCm * 2;
-    const periodSec = getAveragePeriodFromPeaks(analyticsState.peakTimes[key]);
-    const frequencyHz = periodSec ? 1 / periodSec : null;
+    extrema.maxCrestCm =
+      typeof extrema.maxCrestCm === 'number'
+        ? Math.max(extrema.maxCrestCm, displacement)
+        : displacement;
+    extrema.maxTroughCm =
+      typeof extrema.maxTroughCm === 'number'
+        ? Math.min(extrema.maxTroughCm, displacement)
+        : displacement;
 
-    nextAnalytics.perSensor[key] = {
-      amplitudeCm: round(amplitudeCm),
-      waveHeightCm: round(waveHeightCm),
-      waveHeightBandCm: {
-        min: round(waveHeightCm * 0.9),
-        max: round(waveHeightCm * 1.1),
-      },
-      frequencyHz: round(frequencyHz),
-      periodSec: round(periodSec),
+    analytics.perSensor[key] = {
+      currentDisplacementCm: round(displacement),
+      maxCrestCm: round(extrema.maxCrestCm),
+      maxTroughCm: round(extrema.maxTroughCm),
+      spanCm: round(extrema.maxCrestCm - extrema.maxTroughCm),
     };
   }
 
-  const incidentWaveHeight = nextAnalytics.perSensor.s1.waveHeightCm;
-  const interactionWaveHeight = nextAnalytics.perSensor.s2.waveHeightCm;
-  const transmittedWaveHeight = nextAnalytics.perSensor.s3.waveHeightCm;
-  const transmissionRatio =
-    typeof incidentWaveHeight === 'number' && incidentWaveHeight > 0
-      ? transmittedWaveHeight / incidentWaveHeight
-      : null;
-  const reductionEfficiencyPct =
-    typeof incidentWaveHeight === 'number' && incidentWaveHeight > 0
-      ? ((incidentWaveHeight - transmittedWaveHeight) / incidentWaveHeight) * 100
-      : null;
-  const interactionChangePct =
-    typeof incidentWaveHeight === 'number' && incidentWaveHeight > 0
-      ? ((interactionWaveHeight - incidentWaveHeight) / incidentWaveHeight) * 100
-      : null;
-
-  nextAnalytics.breakwater = {
-    reductionEfficiencyPct: round(reductionEfficiencyPct),
-    transmissionRatio: round(transmissionRatio),
-    interactionChangePct: round(interactionChangePct),
-  };
-
-  currentAnalytics = nextAnalytics;
-  return nextAnalytics;
+  currentAnalytics = analytics;
+  return analytics;
 }
 
-function createCalibrationState() {
-  return {
-    active: true,
-    targetSamples: Math.max(1, NODE_CALIBRATION_SAMPLES),
-    collected: 0,
-    sums: { s1: 0, s2: 0, s3: 0 },
-    baseline: { s1: 0, s2: 0, s3: 0 },
-    startedAt: new Date(),
-    completedAt: null,
-  };
+function updateCalibrationStatus(patch) {
+  Object.assign(calibrationState, patch);
+  emitCalibrationStatus();
 }
 
-function getCalibrationStatus() {
-  return {
-    active: nodeCalibration.active,
-    targetSamples: nodeCalibration.targetSamples,
-    collected: nodeCalibration.collected,
-    baseline: nodeCalibration.baseline,
-    startedAt: nodeCalibration.startedAt,
-    completedAt: nodeCalibration.completedAt,
-  };
-}
-
-function startNodeCalibration() {
-  if (!SERIAL_ENABLED) {
-    nodeCalibration = {
-      ...createCalibrationState(),
-      active: false,
-      completedAt: new Date(),
-    };
-    return;
-  }
-
-  nodeCalibration = createCalibrationState();
-  for (const key of SENSOR_KEYS) {
-    nodeFilterState[key] = 0;
-  }
-  console.log(
-    `Node calibration started (${nodeCalibration.targetSamples} samples)`
+function getCalibrationLogLine(line) {
+  const match = line.match(
+    /(CALIBRATION:\s*invalid sample(?:\s+on\s+s[123](?:,\s*s[123])*)?,\s*retrying\.\.\.|CALIBRATION:\s*collecting.*|NOISE CALIBRATION:\s*invalid sample(?:\s+on\s+s[123](?:,\s*s[123])*)?,\s*retrying\.\.\.|NOISE CALIBRATION:.*|NOISE CALIBRATION COMPLETE|Deadband\s+s[123]:.*|CALIBRATION COMPLETE|Baseline\s+s[123]:\s*-?\d+(?:\.\d+)?)/i
   );
-  if (io) {
-    io.emit('calibration:status', getCalibrationStatus());
-  }
+
+  return match ? match[1].trim() : null;
 }
 
-function applyNodeCalibration(sensors) {
-  if (nodeCalibration.active) {
-    for (const key of SENSOR_KEYS) {
-      nodeCalibration.sums[key] += sensors[key];
-    }
-    nodeCalibration.collected += 1;
+function handleCalibrationLogLine(line) {
+  const calibrationLine = getCalibrationLogLine(line);
 
-    if (nodeCalibration.collected >= nodeCalibration.targetSamples) {
-      for (const key of SENSOR_KEYS) {
-        nodeCalibration.baseline[key] =
-          nodeCalibration.sums[key] / nodeCalibration.collected;
-      }
-      nodeCalibration.active = false;
-      nodeCalibration.completedAt = new Date();
-      console.log('Node calibration complete:', nodeCalibration.baseline);
-      if (io) {
-        io.emit('calibration:status', getCalibrationStatus());
-      }
-    }
+  if (!calibrationLine) {
+    return false;
   }
 
-  const calibrated = {};
-  const deadbandBySensor = {
-    s1: NODE_OUTPUT_DEADBAND_CM_S1,
-    s2: NODE_OUTPUT_DEADBAND_CM_S2,
-    s3: NODE_OUTPUT_DEADBAND_CM_S3,
-  };
-
-  for (const key of SENSOR_KEYS) {
-    const shifted = sensors[key] - nodeCalibration.baseline[key];
-    const deadband = deadbandBySensor[key];
-    const gated = Math.abs(shifted) < deadband ? 0 : shifted;
-    const filtered = NODE_EMA_ALPHA * gated + (1 - NODE_EMA_ALPHA) * nodeFilterState[key];
-    nodeFilterState[key] = filtered;
-    calibrated[key] = Math.abs(filtered) < deadband ? 0 : Number(filtered.toFixed(4));
+  if (/^CALIBRATION:\s*collecting/i.test(calibrationLine)) {
+    const match = calibrationLine.match(/(\d+)\/(\d+)/);
+    updateCalibrationStatus({
+      active: true,
+      phase: 'baseline',
+      detail: calibrationLine.replace(/^CALIBRATION:\s*/i, ''),
+      collected: match ? Number(match[1]) : undefined,
+      targetSamples: match ? Number(match[2]) : undefined,
+    });
+    return true;
   }
-  return calibrated;
+
+  if (/^CALIBRATION:\s*invalid sample(?:\s+on\s+s[123](?:,\s*s[123])*)?,\s*retrying\.\.\.$/i.test(calibrationLine)) {
+    const invalidSensors = calibrationLine.match(/on\s+(.+),\s*retrying/i)?.[1] || null;
+    updateCalibrationStatus({
+      active: true,
+      phase: 'baseline',
+      detail: invalidSensors
+        ? `Calibration retrying because ${invalidSensors} returned no echo.`
+        : 'Calibration retrying because one or more sensors returned no echo.',
+    });
+    return true;
+  }
+
+  if (
+    /^NOISE CALIBRATION:\s*invalid sample(?:\s+on\s+s[123](?:,\s*s[123])*)?,\s*retrying\.\.\.$/i.test(
+      calibrationLine
+    )
+  ) {
+    const invalidSensors = calibrationLine.match(/on\s+(.+),\s*retrying/i)?.[1] || null;
+    updateCalibrationStatus({
+      active: true,
+      phase: 'noise',
+      detail: invalidSensors
+        ? `Noise calibration retrying because ${invalidSensors} returned no echo.`
+        : 'Noise calibration retrying because one or more sensors returned no echo.',
+    });
+    return true;
+  }
+
+  if (/^NOISE CALIBRATION:/i.test(calibrationLine)) {
+    const match = calibrationLine.match(/(\d+)\/(\d+)/);
+    updateCalibrationStatus({
+      active: true,
+      phase: 'noise',
+      detail: calibrationLine.replace(/^NOISE CALIBRATION:\s*/i, ''),
+      collected: match ? Number(match[1]) : calibrationState.collected,
+      targetSamples: match ? Number(match[2]) : calibrationState.targetSamples,
+    });
+    return true;
+  }
+
+  if (/^NOISE CALIBRATION COMPLETE$/i.test(calibrationLine)) {
+    updateCalibrationStatus({
+      active: true,
+      phase: 'baseline',
+      detail: 'Noise calibration complete.',
+    });
+    return true;
+  }
+
+  if (/^Deadband\s+s[123]:/i.test(calibrationLine)) {
+    updateCalibrationStatus({
+      active: true,
+      detail: 'Arduino calibration is finalizing.',
+    });
+    return true;
+  }
+
+  if (/^Baseline\s+(s[123]):\s*(-?\d+(?:\.\d+)?)$/i.test(calibrationLine)) {
+    const match = calibrationLine.match(/^Baseline\s+(s[123]):\s*(-?\d+(?:\.\d+)?)$/i);
+    const key = match[1].toLowerCase();
+    const value = Number(match[2]);
+    calibrationState.baseline[key] = value;
+
+    if (!calibrationState.active && hasBaseline()) {
+      calibrationState.detail = 'Arduino calibration complete. Showing translated actual heights.';
+    }
+
+    emitCalibrationStatus();
+    return true;
+  }
+
+  if (/^CALIBRATION COMPLETE$/i.test(calibrationLine)) {
+    updateCalibrationStatus({
+      active: false,
+      phase: 'ready',
+      completedAt: new Date().toISOString(),
+      detail: hasBaseline()
+        ? 'Arduino calibration complete. Showing translated actual heights.'
+        : 'Arduino calibration complete.',
+    });
+    return true;
+  }
+
+  return false;
 }
 
 function normalizeSensorValues(line) {
-  const values = line.split(',').map((value) => Number.parseFloat(value.trim()));
+  const sanitized = line
+    .trim()
+    .replace(/(^|,)\s*-{2,}(?=\d)/g, '$1-')
+    .replace(/[^0-9,.\-\s]/g, '');
+
+  const values = sanitized
+    .split(',')
+    .map((value) => Number.parseFloat(value.trim()));
 
   if (values.length !== SENSOR_KEYS.length || values.some(Number.isNaN)) {
     return null;
@@ -295,19 +330,15 @@ function normalizeSensorValues(line) {
   }, {});
 }
 
-function isCalibrationLogLine(line) {
-  return (
-    line.startsWith('CALIBRATION:') ||
-    line.startsWith('CALIBRATION ') ||
-    line.startsWith('NOISE CALIBRATION') ||
-    line.startsWith('BASELINE ')
-  );
+function getInvalidActualHeightKeys(sensors) {
+  return SENSOR_KEYS.filter((key) => !isValidActualHeightValue(sensors[key]));
 }
 
 function buildReadingPayload(document) {
   return {
     id: document._id?.toString?.() || null,
     sensors: document.sensors,
+    rawSensors: document.rawSensors || document.sensors,
     createdAt: document.createdAt,
     analytics: document.analytics || currentAnalytics,
   };
@@ -375,6 +406,13 @@ async function connectToMongo() {
   readingsCollection = database.collection(MONGODB_COLLECTION);
   await readingsCollection.createIndex({ createdAt: -1 });
 
+  if (RESET_READINGS_ON_START) {
+    const result = await readingsCollection.deleteMany({});
+    console.log(
+      `Startup reset cleared ${result.deletedCount} stored sensor readings`
+    );
+  }
+
   console.log(
     `MongoDB connected: ${MONGODB_DB}.${MONGODB_COLLECTION} at ${MONGODB_URI}`
   );
@@ -407,6 +445,7 @@ function startSerialReader() {
       connected: false,
       message: `Serial unavailable: ${error.message}`,
     };
+    emitSerialStatus();
     console.error(serialStatus.message);
     return null;
   }
@@ -419,7 +458,10 @@ function startSerialReader() {
       connected: true,
       message: `Serial connected on ${SERIAL_PORT_PATH}`,
     };
-    console.log(`Serial port connected on ${SERIAL_PORT_PATH} @ ${SERIAL_BAUD_RATE}`);
+    emitSerialStatus();
+    console.log(
+      `Serial port connected on ${SERIAL_PORT_PATH} @ ${SERIAL_BAUD_RATE}`
+    );
   });
 
   port.on('error', (error) => {
@@ -428,6 +470,7 @@ function startSerialReader() {
       connected: false,
       message: `Serial port error: ${error.message}`,
     };
+    emitSerialStatus();
     console.error('Serial port error:', error.message);
   });
 
@@ -438,23 +481,39 @@ function startSerialReader() {
       return;
     }
 
+    if (handleCalibrationLogLine(rawLine)) {
+      return;
+    }
+
     const sensors = normalizeSensorValues(rawLine);
 
     if (!sensors) {
-      if (!isCalibrationLogLine(rawLine)) {
-        console.warn(`Skipping invalid serial line: ${rawLine}`);
-      }
+      console.warn(`Skipping invalid serial line: ${rawLine}`);
+      return;
+    }
+
+    if (!isFiniteSensorSample(sensors)) {
+      console.warn(`Skipping invalid sensor sample: ${rawLine}`);
+      return;
+    }
+
+    const translatedSensors = translateToActualHeights(sensors);
+
+    const invalidKeys = getInvalidActualHeightKeys(translatedSensors);
+    if (invalidKeys.length) {
+      console.warn(
+        `Skipping invalid sensor sample (${invalidKeys.join(', ')}): ${rawLine}`
+      );
       return;
     }
 
     try {
-      const calibratedSensors = applyNodeCalibration(sensors);
       const createdAt = new Date();
-      const analytics = updateAnalytics(calibratedSensors, createdAt);
+      const analytics = updateDisplacementAnalytics(sensors);
       const reading = await storeReading(
         rawLine,
         sensors,
-        calibratedSensors,
+        translatedSensors,
         analytics,
         createdAt
       );
@@ -497,10 +556,9 @@ function createApp() {
   });
 
   app.post('/api/calibration/node/start', (_req, res) => {
-    startNodeCalibration();
     res.json({
       ok: true,
-      message: 'Node calibration restarted',
+      message: 'Raw height logging mode is active. No calibration step is required.',
       calibration: getCalibrationStatus(),
     });
   });
@@ -527,6 +585,8 @@ function createApp() {
 }
 
 async function start() {
+  resetCalibrationState();
+  resetAnalyticsState();
   await connectToMongo();
 
   const app = createApp();
@@ -549,10 +609,12 @@ async function start() {
   });
 
   server.listen(HTTP_PORT, () => {
-    console.log(`API and Socket.IO server available at http://localhost:${HTTP_PORT}`);
+    console.log(
+      `API and Socket.IO server available at http://localhost:${HTTP_PORT}`
+    );
   });
 
-  startNodeCalibration();
+  emitCalibrationStatus();
   startSerialReader();
 }
 
